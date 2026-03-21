@@ -4,6 +4,20 @@ set -euo pipefail
 # Piper-Tools/bootstrap.sh
 # Full setup from empty folder: system deps, clone, venv, libs.
 # Run from within ./Piper-Tools:  cd Piper-Tools && ./bootstrap.sh
+# Use --delete to remove cloned checkout and venv:
+#   ./bootstrap.sh --delete
+
+CLEANUP="false"
+if [ "$#" -gt 0 ] && [ "$1" = "--delete" ]; then
+  CLEANUP="true"
+fi
+
+if [ "$CLEANUP" = "true" ]; then
+  echo "Deleting piper1-gpl and .venv..."
+  rm -rf piper1-gpl .venv
+  echo "Deleted. Exiting."
+  exit 0
+fi
 
 # 1) System dependencies (Debian/Ubuntu; adjust for other distros)
 if ! command -v apt >/dev/null 2>&1; then
@@ -17,7 +31,12 @@ fi
 # 2) Clone piper1-gpl if it doesn't exist
 if [ ! -d "piper1-gpl" ]; then
   echo "Cloning piper1-gpl source..."
-  git clone https://github.com/rhasspy/piper1-gpl.git piper1-gpl
+  if git ls-remote git@github.com:OHF-Voice/piper1-gpl.git >/dev/null 2>&1; then
+    git clone git@github.com:OHF-Voice/piper1-gpl.git piper1-gpl
+  else
+    echo "SSH clone failed or SSH key not configured; falling back to HTTPS (may prompt for credentials)."
+    git clone https://github.com/OHF-Voice/piper1-gpl.git piper1-gpl
+  fi
 else
   echo "piper1-gpl directory already exists, skipping clone (or update with git -C piper1-gpl pull)."
 fi
