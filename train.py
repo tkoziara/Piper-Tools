@@ -668,6 +668,72 @@ def synth_test(model: Path, text: str, out_file: Path) -> None:
     subprocess.run(cmd, check=True)
 
 
+def synth_test_checkpoint(checkpoint: Path, text: str, out_file: Path, espeak_voice: str = "en-us") -> None:
+    checkpoint = checkpoint.resolve()
+    out_file = out_file.resolve()
+
+    import torch
+    from piper.phoneme_ids import phonemes_to_ids
+    from piper.phonemize_espeak import EspeakPhonemizer
+    from piper.train.vits.lightning import VitsModel
+
+    print(f"Synthesizing from checkpoint: {checkpoint}")
+    model = VitsModel.load_from_checkpoint(checkpoint, map_location="cpu")
+    model.eval()
+
+    model_g = model.model_g
+    with torch.no_grad():
+        try:
+            model_g.dec.remove_weight_norm()
+        except Exception:
+            pass
+
+        phonemizer = EspeakPhonemizer()
+        phoneme_lists = phonemizer.phonemize(espeak_voice, text)
+        phonemes = [p for sentence in phoneme_lists for p in sentence]
+        ids = phonemes_to_ids(phonemes)
+
+        if len(ids) == 0:
+            raise ValueError("No phonemes generated for text")
+
+        text_tensor = torch.LongTensor(ids).unsqueeze(0)
+        text_lengths = torch.LongTensor([text_tensor.size(1)])
+
+        scales = torch.FloatTensor([0.667, 1.0, 0.8])
+
+        sid = None
+        try:
+            n_speakers = model.model_g.n_speakers
+        except Exception:
+            n_speakers = 1
+
+        if n_speakers > 1:
+            sid = torch.LongTensor([0])
+
+        out_audio, _, _, _ = model_g.infer(
+            text_tensor,
+            text_lengths,
+            sid=sid,
+            noise_scale=scales[0],
+            length_scale=scales[1],
+            noise_scale_w=scales[2],
+        )
+
+    out_audio = out_audio.squeeze().cpu().numpy()
+    out_audio = (out_audio * 32767.0).clip(-32768, 32767).astype('int16')
+
+    import wave
+
+    sample_rate = getattr(model.model_g.hparams, 'sample_rate', 22050)
+    with wave.open(str(out_file), 'wb') as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(int(sample_rate))
+        wav_file.writeframes(out_audio.tobytes())
+
+    print(f"Wrote checkpoint synth output to {out_file}")
+
+
 def print_training_command(out_dir: Path, backend: str, quality: str, gpu: bool, run: bool) -> None:
     out_dir = out_dir.resolve()
     preset = quality_presets(quality)
@@ -740,6 +806,13 @@ def main():
     p_synth.add_argument("--text", type=str, required=True, help="Text to synthesize")
     p_synth.add_argument("--out-file", type=Path, default=Path("test_synth.wav"), help="Output WAV file")
 
+    # checkpoint synth
+    p_synth_ckpt = sub.add_parser("synth-checkpoint", help="Synthesize a test WAV directly from a checkpoint using VITS interpreter")
+    p_synth_ckpt.add_argument("--checkpoint", type=Path, required=True, help="Path to .ckpt checkpoint")
+    p_synth_ckpt.add_argument("--text", type=str, required=True, help="Text to synthesize")
+    p_synth_ckpt.add_argument("--out-file", type=Path, default=Path("test_synth_from_ckpt.wav"), help="Output WAV file")
+    p_synth_ckpt.add_argument("--espeak-voice", type=str, default="en-us", help="espeak voice for phonemization")
+
     args = parser.parse_args()
 
     if args.cmd in ("init", "prepare"):
@@ -768,10 +841,12 @@ def main():
             args.run,
             args.epochs,
             batch_size=args.batch_size,
-            # pass num_workers through to training CLI
             num_workers=args.num_workers,
             espeak_voice=args.espeak_voice,
         )
+
+    elif args.cmd == "synth-checkpoint":
+        synth_test_checkpoint(args.checkpoint, args.text, args.out_file, espeak_voice=args.espeak_voice)
 
     elif args.cmd == "export":
         export_onnx(args.checkpoint, args.output)
