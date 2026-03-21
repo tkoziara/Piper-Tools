@@ -446,8 +446,11 @@ def sanitize_checkpoint(ckpt_path: Path) -> Path:
     """
     import torch, pathlib
 
-    # ensure safe globals for pathlib
-    torch.serialization.add_safe_globals([pathlib.PosixPath])
+    # ensure safe globals for pathlib if supported (PyTorch version compatibility)
+    try:
+        torch.serialization.add_safe_globals([pathlib.PosixPath])
+    except AttributeError:
+        pass
 
     orig = ckpt_path.resolve()
     # If the checkpoint already appears to be a cleaned file, return it
@@ -545,7 +548,10 @@ def run_train(out_dir: Path, ckpt_path: Path, voice_name: str, quality: str, gpu
         # run with a small Python snippet that adds torch safe globals before
         # the module is imported (needed for checkpoints containing Pathlib)
         snippet = f"""import torch, pathlib, runpy, sys
-torch.serialization.add_safe_globals([pathlib.PosixPath])
+try:
+    torch.serialization.add_safe_globals([pathlib.PosixPath])
+except AttributeError:
+    pass
 sys.argv = ['piper.train'] + {args!r}
 runpy.run_module('piper.train', run_name='__main__')
 """
@@ -724,7 +730,18 @@ def synth_test_checkpoint(checkpoint: Path, text: str, out_file: Path, espeak_vo
 
     import wave
 
-    sample_rate = getattr(model.model_g.hparams, 'sample_rate', 22050)
+    sample_rate = 22050
+    # model_g may expose sample_rate directly or via a .hparams object/dict
+    if hasattr(model.model_g, 'sample_rate'):
+        sample_rate = model.model_g.sample_rate
+    else:
+        hparams_obj = getattr(model.model_g, 'hparams', None) or getattr(model, 'hparams', None)
+        if hparams_obj is not None:
+            try:
+                sample_rate = int(getattr(hparams_obj, 'sample_rate', hparams_obj.get('sample_rate', SAMPLE_RATE)))
+            except Exception:
+                sample_rate = SAMPLE_RATE
+
     with wave.open(str(out_file), 'wb') as wav_file:
         wav_file.setnchannels(1)
         wav_file.setsampwidth(2)

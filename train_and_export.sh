@@ -38,6 +38,8 @@ Options:
                 wrapper immediately.
   --no-onnx    Skip ONNX export per round; still execute synth-test from
                 checkpoint and perform final ONNX export after all rounds.
+  --clean      Remove existing $OUT_DIR/tts_output and round artifacts before
+                starting (fresh start for same output dir).
   --text       Test text for synth-test (defaults to an English or Polish
                 sentence depending on language inferred from the dataset or
                 checkpoint.)
@@ -57,6 +59,7 @@ ROUNDS=1
 ATTEMPTS=3
 DO_RUN="false"
 NO_ONNX="false"
+CLEAN="false"
 CPUS=10
 
 while [ "$#" -gt 0 ]; do
@@ -73,6 +76,7 @@ while [ "$#" -gt 0 ]; do
     --attempts) ATTEMPTS="$2"; shift 2;;
     --yes) DO_RUN="true"; shift 1;;
     --no-onnx) NO_ONNX="true"; shift 1;;
+    --clean) CLEAN="true"; shift 1;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown arg: $1"; usage; exit 1;;
   esac
@@ -81,6 +85,10 @@ done
 if [ -z "$OUT_DIR" ]; then
   echo "--out-dir is required"; usage; exit 1
 fi
+
+# ensure output path is absolute and exists for all generated artifacts
+mkdir -p "$OUT_DIR"
+OUT_DIR=$(realpath "$OUT_DIR")
 
 # figure out language of dataset (english vs polish) so we can pick sensible
 # default test text if the user didn't supply one.  we look at voice_config.json
@@ -135,8 +143,8 @@ fi
 if [ -z "$CKPT" ]; then
   if [ -d "$OUT_DIR/tts_output" ]; then
     CKPT_PREV=$(find "$OUT_DIR/tts_output" -type f -name "*.ckpt" -print0 \
-        | xargs -0 ls -t 2>/dev/null | head -n1 || true)
-    if [ -n "$CKPT_PREV" ]; then
+        | xargs -0 --no-run-if-empty ls -1t 2>/dev/null | head -n1 || true)
+    if [ -n "$CKPT_PREV" ] && [ -f "$CKPT_PREV" ]; then
       CKPT="$CKPT_PREV"
       echo "Using existing checkpoint from output directory: $CKPT"
     fi
@@ -202,6 +210,16 @@ PY
     CKPT_CAND="$HOME/.piper/checkpoints/$QUALITY/base_checkpoint.ckpt"
   fi
 
+  if [ -z "$CKPT_CAND" ]; then
+    # try fetching one from HF via train.py helper (non-interactive)
+    echo "No local checkpoint found; fetching base checkpoint into ~/.piper/checkpoints/$QUALITY"
+    FETCH_OUTPUT=$(python3 "$ROOT/train.py" fetch-base --dest-dir "$HOME/.piper/checkpoints/$QUALITY" --quality "$QUALITY" --yes 2>&1 || true)
+    CKPT_CAND=$(echo "$FETCH_OUTPUT" | grep -Eo '/[^ ]+\.ckpt' | tail -n1 || true)
+    if [ -n "$CKPT_CAND" ] && [ ! -f "$CKPT_CAND" ]; then
+      CKPT_CAND=""
+    fi
+  fi
+
   if [ -n "$CKPT_CAND" ]; then
     CKPT="$CKPT_CAND"
     echo "Auto-selected checkpoint: $CKPT"
@@ -216,6 +234,13 @@ PY
       echo "No checkpoint found automatically; defaulting to English reference: $CKPT"
     fi
   fi
+fi
+
+# Ensure selected checkpoint exists and is a file
+if [ -z "$CKPT" ] || [ ! -f "$CKPT" ]; then
+  echo "ERROR: No valid checkpoint found. Checked paths: $CKPT" >&2
+  echo "Please run: python3 $ROOT/train.py fetch-base --dest-dir \"$HOME/.piper/checkpoints/$QUALITY\" --quality $QUALITY --yes" >&2
+  exit 1
 fi
 
 # determine how many rounds we already have output for and adjust
@@ -261,6 +286,12 @@ if [ -d "$OUT_DIR" ]; then
     | sed -n 's/.*-r\([0-9]\+\)\.onnx$/\1/p' \
     | sort -n | tail -n1 || true)
   existing_rounds=${existing_rounds:-0}
+fi
+if [ "$CLEAN" = "true" ]; then
+  echo "--clean set: removing existing artifacts from $OUT_DIR"
+  rm -rf "$OUT_DIR/tts_output"
+  rm -f "$OUT_DIR/${VOICE_NAME}-${QUALITY}-r"*.onnx "$OUT_DIR/${VOICE_NAME}-${QUALITY}-r"*.wav "$OUT_DIR/test_synth.wav"
+  existing_rounds=0
 fi
 if [ "$existing_rounds" -ge "$ROUNDS" ]; then
   echo "Detected $existing_rounds existing rounds (>= requested $ROUNDS); nothing to do."
@@ -347,6 +378,14 @@ if [ "$DO_RUN" = "true" ]; then
       prev_ckpt=$(find "$OUT_DIR/tts_output" -type f -name "*.ckpt" -print0 \
         | xargs -0 ls -t 2>/dev/null | head -n1 || true)
       CKPT="$prev_ckpt"
+
+      # remove Lightning event files, they are not needed for model release
+      # and otherwise accumulate in tts_output/lightning_logs.
+      find "$OUT_DIR/tts_output" -type f -name 'events.out.tfevents*' -delete || true
+      # keep only the latest checkpoint file to avoid retaining historical large states
+      if [ -n "$prev_ckpt" ]; then
+        find "$OUT_DIR/tts_output" -type f -name '*.ckpt' ! -path "$prev_ckpt" -delete || true
+      fi
     fi
 
     OUT_WAV="$OUT_DIR/${VOICE_NAME}-${QUALITY}-r${round}.wav"
