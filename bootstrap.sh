@@ -8,24 +8,49 @@ set -euo pipefail
 #   ./bootstrap.sh --delete
 
 CLEANUP="false"
-if [ "$#" -gt 0 ] && [ "$1" = "--delete" ]; then
-  CLEANUP="true"
-fi
+SKIP_SYS_DEPS="false"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --delete)
+      CLEANUP="true"
+      shift
+      ;;
+    --skip_sys_deps)
+      SKIP_SYS_DEPS="true"
+      shift
+      ;;
+    *)
+      echo "Unknown flag: $1"
+      exit 1
+      ;;
+  esac
+done
 
 if [ "$CLEANUP" = "true" ]; then
   echo "Deleting piper1-gpl and .venv..."
-  rm -rf piper1-gpl .venv
+  python3 - <<'PY'
+import pathlib, shutil
+for p in [pathlib.Path('piper1-gpl'), pathlib.Path('.venv')]:
+    if p.is_symlink() or p.exists():
+        if p.is_dir() and not p.is_symlink():
+            shutil.rmtree(p)
+        else:
+            p.unlink()
+PY
   echo "Deleted. Exiting."
   exit 0
 fi
 
 # 1) System dependencies (Debian/Ubuntu; adjust for other distros)
-if ! command -v apt >/dev/null 2>&1; then
+if [ "$SKIP_SYS_DEPS" = "false" ]; then
+  if ! command -v apt >/dev/null 2>&1; then
   echo "apt not found; please install build-essential cmake ninja-build python3-venv python3-dev pkg-config ffmpeg libsndfile1 git curl manually."
-else
-  echo "Installing system dependencies..."
-  sudo apt update
-  sudo apt install -y build-essential cmake ninja-build python3-venv python3-dev pkg-config ffmpeg libsndfile1 git curl
+  else
+    echo "Installing system dependencies..."
+    sudo apt update
+    sudo apt install -y build-essential cmake ninja-build python3-venv python3-dev pkg-config ffmpeg libsndfile1 git curl
+  fi
 fi
 
 # 2) Setup piper1-gpl source path (prefer existing working checkout at ~/Piper/piper1-gpl)
@@ -63,7 +88,12 @@ python3 -m pip install --upgrade pip
 
 # 4) Install required Python packages
 echo "Installing Python dependencies..."
-python3 -m pip install --upgrade torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cpu || true
+# Pin torch to a known stable CPU version for Piper so ONNX export is more reliable
+PYTORCH_VERSION="2.2.2"
+python3 -m pip install --upgrade "torch==${PYTORCH_VERSION}+cpu" "torchvision==0.17.2+cpu" "torchaudio==2.2.2+cpu" --extra-index-url https://download.pytorch.org/whl/cpu || \
+python3 -m pip install --upgrade "torch==${PYTORCH_VERSION}" "torchvision==0.17.2" "torchaudio==2.2.2"
+# Enforce a numpy version compatible with existing torch/compiled extensions.
+python3 -m pip install --upgrade "numpy<2"
 # Install direct dependencies needed for training pipeline.
 python3 -m pip install --upgrade piper-tts onnxscript flask openai-whisper soundfile librosa lightning pytorch-lightning pysilero-vad pathvalidate jsonargparse[signatures] || true
 
