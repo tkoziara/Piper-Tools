@@ -36,6 +36,8 @@ Options:
   --attempts   Number of attempts to run each round if the trainer is
                 killed by the OS (default: 3).  Ctrl+C still stops the
                 wrapper immediately.
+  --no-onnx    Skip ONNX export per round; still execute synth-test from
+                checkpoint and perform final ONNX export after all rounds.
   --text       Test text for synth-test (defaults to an English or Polish
                 sentence depending on language inferred from the dataset or
                 checkpoint.)
@@ -54,6 +56,7 @@ EPOCHS=""
 ROUNDS=1
 ATTEMPTS=3
 DO_RUN="false"
+NO_ONNX="false"
 CPUS=10
 
 while [ "$#" -gt 0 ]; do
@@ -69,6 +72,7 @@ while [ "$#" -gt 0 ]; do
     --rounds) ROUNDS="$2"; shift 2;;
     --attempts) ATTEMPTS="$2"; shift 2;;
     --yes) DO_RUN="true"; shift 1;;
+    --no-onnx) NO_ONNX="true"; shift 1;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown arg: $1"; usage; exit 1;;
   esac
@@ -345,17 +349,36 @@ if [ "$DO_RUN" = "true" ]; then
       CKPT="$prev_ckpt"
     fi
 
-    # export and synth-test for this round
-    OUT_ONNX="$OUT_DIR/${VOICE_NAME}-${QUALITY}-r${round}.onnx"
-    echo "Exporting checkpoint $prev_ckpt -> $OUT_ONNX"
-    if ! python3 "$ROOT/train.py" export --checkpoint "$prev_ckpt" --output "$OUT_ONNX"; then
-      echo "Export failed for round $round" >&2
+    OUT_WAV="$OUT_DIR/${VOICE_NAME}-${QUALITY}-r${round}.wav"
+
+    if [ "$NO_ONNX" = "true" ]; then
+      echo "Skipping ONNX export for round $round (--no-onnx set)."
+      echo "Synth-testing from checkpoint $prev_ckpt for round $round"
+      if python3 "$ROOT/train.py" synth-checkpoint --checkpoint "$prev_ckpt" --text "$TEXT" --out-file "$OUT_WAV" --espeak-voice "$ESPEAK_VOICE"; then
+        echo "Saved round $round checkpoint preview: $OUT_WAV"
+      else
+        echo "Checkpoint synth-test failed for round $round" >&2
+      fi
+    else
+      OUT_ONNX="$OUT_DIR/${VOICE_NAME}-${QUALITY}-r${round}.onnx"
+      echo "Exporting checkpoint $prev_ckpt -> $OUT_ONNX"
+      if python3 "$ROOT/train.py" export --checkpoint "$prev_ckpt" --output "$OUT_ONNX"; then
+        echo "Export succeeded for round $round -> $OUT_ONNX"
+        echo "Synth-testing round $round with text: $TEXT"
+        if python3 "$ROOT/train.py" synth-test --model "$OUT_ONNX" --text "$TEXT" --out-file "$OUT_WAV"; then
+          echo "Saved round $round preview: $OUT_WAV"
+        else
+          echo "Synth-test failed for round $round" >&2
+        fi
+      else
+        echo "Export failed for round $round; falling back to checkpoint-based synth-test" >&2
+        if python3 "$ROOT/train.py" synth-checkpoint --checkpoint "$prev_ckpt" --text "$TEXT" --out-file "$OUT_WAV" --espeak-voice "$ESPEAK_VOICE"; then
+          echo "Saved round $round checkpoint preview: $OUT_WAV"
+        else
+          echo "Checkpoint synth-test also failed for round $round" >&2
+        fi
+      fi
     fi
-    # Do not copy the dataset `voice_config.json` into the model `.json`.
-    # The exporter should create a compatible model config; copying the
-    # dataset config produces an invalid model config (missing model keys).
-    echo "Synth-testing round $round"
-    python3 "$ROOT/train.py" synth-test --model "$OUT_ONNX" --text "$TEXT" --out-file "$OUT_DIR/${VOICE_NAME}-${QUALITY}-r${round}.wav" || true
   done
 else
   echo "Not running training. Rerun with --yes to execute."
@@ -377,21 +400,35 @@ else
   exit 0
 fi
 
-OUT_ONNX="$OUT_DIR/${VOICE_NAME}-${QUALITY}.onnx"
-echo "Exporting checkpoint $LATEST_CKPT -> $OUT_ONNX"
-if ! python3 "$ROOT/train.py" export --checkpoint "$LATEST_CKPT" --output "$OUT_ONNX"; then
-  echo "Export failed.  This usually means a dependency is missing (e.g."
-  echo "  ModuleNotFoundError: No module named 'onnxscript')."
-  echo "Install 'onnxscript' in the venv or re-run ./setup_venv.sh to add it."
-  exit 0
+# prefer the last per-round ONNX artifact (if available), otherwise fall back to exporting the latest checkpoint
+LATEST_ONNX=$(find "$OUT_DIR" -maxdepth 1 -type f -name "${VOICE_NAME}-${QUALITY}-r*.onnx" | sort | tail -n1 || true)
+if [ -n "$LATEST_ONNX" ]; then
+  OUT_ONNX="$LATEST_ONNX"
+  echo "Using existing per-round ONNX snapshot: $OUT_ONNX"
+else
+  OUT_ONNX="$OUT_DIR/${VOICE_NAME}-${QUALITY}.onnx"
+  echo "No per-round ONNX found; exporting latest checkpoint $LATEST_CKPT -> $OUT_ONNX"
+  if ! python3 "$ROOT/train.py" export --checkpoint "$LATEST_CKPT" --output "$OUT_ONNX"; then
+    echo "Export failed.  This is likely due to ONNX exporter limitations with this model (torch.export issues)." >&2
+    echo "Check the traceback in train.py for guard/data-dependent shape errors." >&2
+    echo "You can try: 1) PyTorch 2.5/2.6, 2) modify piper1-gpl src/vits/transforms.py to avoid assertions in rational_quadratic_spline, or 3) use ONNX draft_export in piper1-gpl/src/piper/train/export_onnx.py." >&2
+    echo "Skipping final export and continuing with latest successful round model (if one exists)." >&2
+    if [ -n "$LATEST_ONNX" ]; then
+      OUT_ONNX="$LATEST_ONNX"
+      echo "Falling back to per-round model: $OUT_ONNX"
+    else
+      echo "No model available for synth-test; aborting." >&2
+      exit 1
+    fi
+  fi
 fi
 
-# make sure an associated .json config exists for runtime
+# ensure a corresponding model config JSON exists for runtime
 if [ ! -f "$OUT_ONNX.json" ]; then
   echo "Warning: exporter did not produce a model .json for $OUT_ONNX; not copying dataset voice_config.json (would be invalid)." >&2
 fi
 
-echo "Running synth-test with exported model"
+echo "Running synth-test with model $OUT_ONNX"
 python3 "$ROOT/train.py" synth-test --model "$OUT_ONNX" --text "$TEXT" --out-file "$OUT_DIR/test_synth.wav"
 
 echo "Done. test_synth.wav written to $OUT_DIR"
