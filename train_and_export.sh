@@ -140,6 +140,32 @@ fi
 # if the caller didn't specify a checkpoint, first see if the dataset
 # folder already contains one from a previous run.  this lets us continue
 # training without forcing the user to re-specify --ckpt.
+
+# Sanitize and suppress noisy backend logs while preserving progress and fatal errors.
+# Keep this near the top so all command invocations can use it.
+quiet_run() {
+  local tmpfile
+  tmpfile=$(mktemp)
+
+  # run command and capture all stdout+stderr, filtering noisy messages.
+  # We retain meaningful progress lines and errors, and drop repeated info/trivial tips.
+  local rawfile filteredfile
+  rawfile=$(mktemp)
+  filteredfile=$(mktemp)
+
+  if "$@" 2>&1 | tee "$rawfile" | sed -u 's/\x1b\[[0-9;]*m//g' | grep -v -E '^(.*device discovery failed.*|.*No seed found.*|.*torch\.nn\.utils\.weight_norm.*|.*warnings\.warn.*|.*TracerWarning.*|.*UserWarning.*|.*WARNING.*|.*INFO.*|.*Tip.*|.*lightning\.pytorch\.callbacks\.model_checkpoint.*|.*lightning\.pytorch\.loops.*|.*Restoring states from.*|.*Lightning automatically upgraded.*|^\s*t_s == t_t\s*$|^\s*pad_length =.*|^\s*slice_start_position =.*|^\s*if pad_length > 0:.*|^\s*_C\._jit_pass_onnx.*|^\s*_C\._jit_pass_onnx_graph_shape_type_inference.*)$' > "$filteredfile"; then
+    cat "$filteredfile"
+    rm -f "$rawfile" "$filteredfile"
+    return 0
+  else
+    cat "$filteredfile"
+    echo "--- ERROR: full log for debugging (raw below) ---"
+    cat "$rawfile"
+    rm -f "$rawfile" "$filteredfile"
+    return 1
+  fi
+}
+
 if [ -z "$CKPT" ]; then
   if [ -d "$OUT_DIR/tts_output" ]; then
     CKPT_PREV=$(find "$OUT_DIR/tts_output" -type f -name "*.ckpt" -print0 \
@@ -290,7 +316,7 @@ fi
 if [ "$CLEAN" = "true" ]; then
   echo "--clean set: removing existing artifacts from $OUT_DIR"
   rm -rf "$OUT_DIR/tts_output"
-  rm -f "$OUT_DIR/${VOICE_NAME}-${QUALITY}-r"*.onnx "$OUT_DIR/${VOICE_NAME}-${QUALITY}-r"*.wav "$OUT_DIR/test_synth.wav"
+  rm -f "$OUT_DIR/${VOICE_NAME}-${QUALITY}-r"*.onnx "$OUT_DIR/${VOICE_NAME}-${QUALITY}-r"*.onnx.json "$OUT_DIR/${VOICE_NAME}-${QUALITY}-r"*.wav "$OUT_DIR/test_synth.wav"
   existing_rounds=0
 fi
 if [ "$existing_rounds" -ge "$ROUNDS" ]; then
@@ -347,8 +373,21 @@ if [ "$DO_RUN" = "true" ]; then
     attempt=1
     while true; do
       echo "  attempt $attempt/$ATTEMPTS"
-      python3 "$ROOT/train.py" train --out-dir "$OUT_DIR" --ckpt "$prev_ckpt" --voice-name "$VOICE_NAME" --quality "$QUALITY" --batch-size "$BATCH_SIZE" --num-workers "$CPUS" --espeak-voice "$ESPEAK_VOICE" $( [ -n "$EPOCHS" ] && printf -- "--epochs %s" "$EPOCHS" ) --run
-      rc=$?
+      # run training; keep progress but filter known noisy lines
+      python3 "$ROOT/train.py" train --out-dir "$OUT_DIR" --ckpt "$prev_ckpt" --voice-name "$VOICE_NAME" --quality "$QUALITY" --batch-size "$BATCH_SIZE" --num-workers "$CPUS" --espeak-voice "$ESPEAK_VOICE" $( [ -n "$EPOCHS" ] && printf -- "--epochs %s" "$EPOCHS" ) --run 2>&1 | sed -u 's/\x1b\[[0-9;]*m//g' | sed -E '
+        /\[W:onnxruntime:Default, device_discovery\.cc:[0-9]+ DiscoverDevicesForPlatform\]/d;
+        /No seed found, seed set to 0/d;
+        /torch\.nn\.utils\.weight_norm is deprecated/d;
+        /GPU available:/d;
+        /TPU available:/d;
+        /Tip: For seamless cloud logging/d;
+        /Tip: For seamless cloud uploads/d;
+        /Restoring states from the checkpoint path at/d;
+        /Lightning automatically upgraded/d;
+        /model_checkpoint\.py:[0-9]+: The dirpath has changed/d;
+        /INFO:piper\.train\.vits\.dataset:Processed/d;
+      '
+      rc=${PIPESTATUS[0]}
       if [ $rc -eq 0 ]; then
         break
       fi
@@ -393,7 +432,7 @@ if [ "$DO_RUN" = "true" ]; then
     if [ "$NO_ONNX" = "true" ]; then
       echo "Skipping ONNX export for round $round (--no-onnx set)."
       echo "Synth-testing from checkpoint $prev_ckpt for round $round"
-      if python3 "$ROOT/train.py" synth-checkpoint --checkpoint "$prev_ckpt" --text "$TEXT" --out-file "$OUT_WAV" --espeak-voice "$ESPEAK_VOICE"; then
+      if quiet_run python3 "$ROOT/train.py" synth-checkpoint --checkpoint "$prev_ckpt" --text "$TEXT" --out-file "$OUT_WAV" --espeak-voice "$ESPEAK_VOICE"; then
         echo "Saved round $round checkpoint preview: $OUT_WAV"
       else
         echo "Checkpoint synth-test failed for round $round" >&2
@@ -401,17 +440,17 @@ if [ "$DO_RUN" = "true" ]; then
     else
       OUT_ONNX="$OUT_DIR/${VOICE_NAME}-${QUALITY}-r${round}.onnx"
       echo "Exporting checkpoint $prev_ckpt -> $OUT_ONNX"
-      if python3 "$ROOT/train.py" export --checkpoint "$prev_ckpt" --output "$OUT_ONNX"; then
+      if quiet_run python3 "$ROOT/train.py" export --checkpoint "$prev_ckpt" --output "$OUT_ONNX"; then
         echo "Export succeeded for round $round -> $OUT_ONNX"
         echo "Synth-testing round $round with text: $TEXT"
-        if python3 "$ROOT/train.py" synth-test --model "$OUT_ONNX" --text "$TEXT" --out-file "$OUT_WAV"; then
+        if quiet_run python3 "$ROOT/train.py" synth-test --model "$OUT_ONNX" --text "$TEXT" --out-file "$OUT_WAV"; then
           echo "Saved round $round preview: $OUT_WAV"
         else
           echo "Synth-test failed for round $round" >&2
         fi
       else
         echo "Export failed for round $round; falling back to checkpoint-based synth-test" >&2
-        if python3 "$ROOT/train.py" synth-checkpoint --checkpoint "$prev_ckpt" --text "$TEXT" --out-file "$OUT_WAV" --espeak-voice "$ESPEAK_VOICE"; then
+        if quiet_run python3 "$ROOT/train.py" synth-checkpoint --checkpoint "$prev_ckpt" --text "$TEXT" --out-file "$OUT_WAV" --espeak-voice "$ESPEAK_VOICE"; then
           echo "Saved round $round checkpoint preview: $OUT_WAV"
         else
           echo "Checkpoint synth-test also failed for round $round" >&2
@@ -447,7 +486,7 @@ if [ -n "$LATEST_ONNX" ]; then
 else
   OUT_ONNX="$OUT_DIR/${VOICE_NAME}-${QUALITY}.onnx"
   echo "No per-round ONNX found; exporting latest checkpoint $LATEST_CKPT -> $OUT_ONNX"
-  if ! python3 "$ROOT/train.py" export --checkpoint "$LATEST_CKPT" --output "$OUT_ONNX"; then
+  if ! quiet_run python3 "$ROOT/train.py" export --checkpoint "$LATEST_CKPT" --output "$OUT_ONNX"; then
     echo "Export failed.  This is likely due to ONNX exporter limitations with this model (torch.export issues)." >&2
     echo "Check the traceback in train.py for guard/data-dependent shape errors." >&2
     echo "You can try: 1) PyTorch 2.5/2.6, 2) modify piper1-gpl src/vits/transforms.py to avoid assertions in rational_quadratic_spline, or 3) use ONNX draft_export in piper1-gpl/src/piper/train/export_onnx.py." >&2
@@ -468,6 +507,6 @@ if [ ! -f "$OUT_ONNX.json" ]; then
 fi
 
 echo "Running synth-test with model $OUT_ONNX"
-python3 "$ROOT/train.py" synth-test --model "$OUT_ONNX" --text "$TEXT" --out-file "$OUT_DIR/test_synth.wav"
+quiet_run python3 "$ROOT/train.py" synth-test --model "$OUT_ONNX" --text "$TEXT" --out-file "$OUT_DIR/test_synth.wav"
 
 echo "Done. test_synth.wav written to $OUT_DIR"
