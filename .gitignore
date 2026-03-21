@@ -1,0 +1,24 @@
+# Ignore python venv and temp files
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+
+# Ignore local datasets and outputs
+training_pl/
+training_en/
+*.wav
+*.onnx
+*.onnx.json
+*.chkpt
+
+# Ignore temporary pip package caches
+pip-wheel-metadata/
+
+# Ignore cloned pipers built artifacts
+piper1-gpl/build/
+
+# Keep logs out
+*.log
