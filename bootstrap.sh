@@ -54,7 +54,7 @@ python3 -m pip install --upgrade pip
 # 4) Install required Python packages
 echo "Installing Python dependencies..."
 python3 -m pip install --upgrade torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cpu || true
-python3 -m pip install --upgrade piper-tts onnxscript flask openai-whisper soundfile
+python3 -m pip install --upgrade piper-tts onnxscript flask openai-whisper soundfile lightning-pytorch
 
 # 5) Quick sanity print
 echo "Bootstrap complete."
