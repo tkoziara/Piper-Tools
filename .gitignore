@@ -18,7 +18,7 @@ training_en/
 pip-wheel-metadata/
 
 # Ignore cloned pipers built artifacts
-piper1-gpl/build/
+piper1-gpl
 
 # Keep logs out
 *.log
