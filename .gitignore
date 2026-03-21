@@ -22,3 +22,6 @@ piper1-gpl
 
 # Keep logs out
 *.log
+
+# Samples
+samples
