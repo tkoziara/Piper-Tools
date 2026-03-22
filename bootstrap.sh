@@ -23,6 +23,13 @@ while [ "$#" -gt 0 ]; do
     *)
       echo "Unknown flag: $1"
       exit 1
+    echo "Compiling Cython extensions (monotonic_align)..."
+    python3 -m pip install --upgrade cython || true
+    if [ -f "$PIPER_SRC_PATH/build_monotonic_align.sh" ]; then
+      (cd "$PIPER_SRC_PATH" && bash build_monotonic_align.sh) || echo "Warning: monotonic_align build failed"
+    else
+      echo "Warning: build_monotonic_align.sh not found in $PIPER_SRC_PATH"
+    fi
       ;;
   esac
 done
@@ -66,11 +73,11 @@ fi
 
 if [ ! -d "piper1-gpl" ] && [ "$PIPER_SRC_PATH" = "piper1-gpl" ]; then
   echo "Cloning piper1-gpl source..."
-  if git ls-remote git@github.com:OHF-Voice/piper1-gpl.git >/dev/null 2>&1; then
-    git clone git@github.com:OHF-Voice/piper1-gpl.git piper1-gpl
+  if git ls-remote git@github.com:tkoziara/piper1-gpl.git >/dev/null 2>&1; then
+    git clone git@github.com:tkoziara/piper1-gpl.git piper1-gpl
   else
     echo "SSH clone failed or SSH key not configured; falling back to HTTPS (may prompt for credentials)."
-    git clone https://github.com/OHF-Voice/piper1-gpl.git piper1-gpl
+    git clone https://github.com/tkoziara/piper1-gpl.git piper1-gpl
   fi
 else
   echo "piper1-gpl source already available at $PIPER_SRC_PATH."
@@ -95,11 +102,23 @@ python3 -m pip install --upgrade "torch==${PYTORCH_VERSION}" "torchvision==0.17.
 # Enforce a numpy version compatible with existing torch/compiled extensions.
 python3 -m pip install --upgrade "numpy<2"
 # Install direct dependencies needed for training pipeline.
+# Ensure scikit-build/core is available so the espeak native extension can be built
+python3 -m pip install --upgrade scikit-build-core wheel setuptools || true
 python3 -m pip install --upgrade piper-tts onnxscript flask openai-whisper soundfile librosa lightning pytorch-lightning pysilero-vad pathvalidate jsonargparse[signatures] || true
 
 if [ -d "$PIPER_SRC_PATH" ]; then
   echo "Installing Piper source from: $PIPER_SRC_PATH"
-  python3 -m pip install --upgrade -e "$PIPER_SRC_PATH[train]"
+  # Try an editable install first (this will invoke the pyproject build backend)
+  python3 -m pip install --upgrade -e "$PIPER_SRC_PATH[train]" || true
+
+  # If the espeak native bridge wasn't produced by the editable install, try an explicit
+  # in-place C-extension build. This often surfaces compiler/linker errors for diagnostics.
+  if [ ! -f "$PIPER_SRC_PATH/src/piper/espeakbridge.so" ]; then
+    echo "espeakbridge.so not found in src; attempting explicit build_ext --inplace"
+    if [ -d "$PIPER_SRC_PATH" ]; then
+      (cd "$PIPER_SRC_PATH" && python3 setup.py build_ext --inplace) || true
+    fi
+  fi
   if [ -f "$PIPER_SRC_PATH/src/piper/espeakbridge.so" ]; then
     echo "espeakbridge native module already built at $PIPER_SRC_PATH/src/piper/espeakbridge.so"
   fi
@@ -108,7 +127,17 @@ if [ -d "$PIPER_SRC_PATH" ]; then
 import importlib.util, sys
 spec = importlib.util.find_spec('piper.espeakbridge')
 if spec is None:
-    sys.exit('ERROR: piper.espeakbridge extension module not found after install.')
+  # Provide extra diagnostics to help debugging native build issues
+  import os, sysconfig, glob
+  sys.stderr.write('ERROR: piper.espeakbridge extension module not found after install.\n')
+  sys.stderr.write('PYTHONPATH=' + os.environ.get('PYTHONPATH','') + '\n')
+  sys.stderr.write('sys.path:\n')
+  for p in sys.path:
+    sys.stderr.write('  ' + p + '\n')
+  sys.stderr.write('\nLooking for built extension files:\n')
+  for f in glob.glob(os.path.join('src','piper','espeakbridge.*')):
+    sys.stderr.write('  ' + f + '\n')
+  sys.exit('ERROR: piper.espeakbridge extension module not found after install.')
 print('INFO: piper.espeakbridge module is available at', spec.origin)
 PY
 else
