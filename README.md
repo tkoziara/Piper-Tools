@@ -1,4 +1,4 @@
-# Piper TTS local runner
+# Piper TTS local and Google Collab runners
 
 The training/export wrapper (`train_and_export.sh`) now looks in the dataset
 folder for previous checkpoints and will use them automatically; if none are
@@ -12,6 +12,8 @@ Files added:
 - `synth.sh` — wrapper to activate `.venv` and run `synth.py`.
 - `sample_en.txt` — English input text.
 - `sample_pl.txt` — Polish input text.
+- `Training.ipynb` — a notebook for training in Google Colab inspired by
+  https://github.com/natlamir/ProjectFiles/blob/main/Piper/Piper_Training.ipynb
 
 Usage (after you install system deps):
 

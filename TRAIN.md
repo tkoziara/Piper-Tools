@@ -15,8 +15,8 @@ Quick usage examples
 1) Prepare a dataset from your samples (normalize audio to 22050 Hz):
 
 ```bash
-python3 train.py init --samples-dir samples --out-dir training_en --lang en
-python3 train.py init --samples-dir samples --out-dir training_pl --lang pl
+python3 train.py init --samples-dir samples_en --out-dir training_en --lang en
+python3 train.py init --samples-dir samples_pl --out-dir training_pl --lang pl
 ```
 
    If you don't have existing audio/text pairs you can build them interactively
@@ -268,7 +268,7 @@ Scenario A — Quick experiment (CPU or small GPU):
 
 ```bash
 # prepare
-python3 train.py init --samples-dir samples --out-dir quick_exp --lang en --quality low
+python3 train.py init --samples-dir samples_en --out-dir quick_exp --lang en --quality low
 
 # fetch small checkpoint (if you have a specific small model id):
 python3 train.py fetch-base --dest-dir ~/.piper/checkpoints/low --quality low --model-id "<your-small-model-id>"
@@ -283,7 +283,7 @@ python3 train.py train --out-dir quick_exp --ckpt ~/.piper/checkpoints/low/base_
 Scenario B — Medium-quality fine-tune (recommended for most users with a modest GPU):
 
 ```bash
-python3 train.py init --samples-dir samples --out-dir training_en --lang en --quality medium
+python3 train.py init --samples-dir samples_en --out-dir training_en --lang en --quality medium
 python3 train.py fetch-base --dest-dir ~/.piper/checkpoints/medium --quality medium
 # inspect printed checkpoint path, then run training (or dry-run first)
 python3 train.py train --out-dir training_en --ckpt ~/.piper/checkpoints/medium/base_checkpoint.ckpt --voice-name tomek --quality medium --run --gpu
@@ -292,7 +292,7 @@ python3 train.py train --out-dir training_en --ckpt ~/.piper/checkpoints/medium/
 Scenario C — High-quality / long run (high VRAM GPU recommended):
 
 ```bash
-python3 train.py init --samples-dir samples --out-dir training_en --lang en --quality high
+python3 train.py init --samples-dir samples_en --out-dir training_en --lang en --quality high
 python3 train.py fetch-base --dest-dir ~/.piper/checkpoints/high --quality high
 python3 train.py train --out-dir training_en --ckpt ~/.piper/checkpoints/high/base_checkpoint.ckpt --voice-name tomek --quality high --run --gpu
 ```

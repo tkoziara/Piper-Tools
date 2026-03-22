@@ -106,8 +106,10 @@ def prepare_dataset(samples_dir: Path, out_dir: Path, lang: str, quality: str, n
     if not samples_dir.exists():
         raise SystemExit(f"Samples directory not found: {samples_dir}")
 
-    lang_dir = samples_dir / lang
-    if not lang_dir.exists():
+    # Allow `--samples-dir` to simply point to the directory with samples in given language
+    if samples_dir.exists():
+        lang_dir = samples_dir
+    else:
         raise SystemExit(f"Language samples directory not found: {lang_dir}")
 
     wavs_dir = out_dir / "wavs"
