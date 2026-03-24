@@ -14,6 +14,7 @@ Files added:
 - `sample_pl.txt` — Polish input text.
 - `Training.ipynb` — a notebook for training in Google Colab inspired by
   https://github.com/natlamir/ProjectFiles/blob/main/Piper/Piper_Training.ipynb
+- `Training.md` — a training parameters tuning guide for `Training.ipynb` notebook
 
 Usage (after you install system deps):
 
