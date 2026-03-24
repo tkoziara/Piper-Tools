@@ -8,7 +8,9 @@ user’s `~/.piper/checkpoints` directory (see TRAIN.md for details).
 Files added:
 
 - `install_system_deps.sh` — script to install system packages (Debian/Ubuntu).
-- `synth.py` — runtime script that synthesizes either built‑in sample texts or a specified ONNX model into WAV files via `piper`. It now accepts a `--model` path for testing intermediate checkpoints.
+- `bootstrap.sh` — full environment bootstrap: installs system packages, clones `piper1-gpl` if missing, creates/activates a Python virtualenv, installs and pins Python packages (optionally using a CPU-pinned torch wheel to improve ONNX export reliability), builds native extensions (espeak bridge), and performs an editable install of the Piper source. Use `./bootstrap.sh --skip_sys_deps` to skip OS package installation or `--delete` to remove the checkout and venv.
+- `synth.py` — runtime script that synthesizes either built‑in sample texts or a specified ONNX model into WAV files via `piper`. It accepts a `--model` path for testing intermediate checkpoints.
+ - `train.py` — training and export CLI wrapper used to run training, perform exports to ONNX, and run synth-tests; supports checkpoint handling and resume.
 - `synth.sh` — wrapper to activate `.venv` and run `synth.py`.
 - `sample_en.txt` — English input text.
 - `sample_pl.txt` — Polish input text.
