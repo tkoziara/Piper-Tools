@@ -239,8 +239,18 @@ cli_args += ['--data.batch_size', str(BATCH_SIZE),
 - Data pipeline bottlenecks are very common—use `NUM_WORKERS` and caching aggressively.
 - Use `accumulate_grad_batches` instead of blindly increasing `BATCH_SIZE` when memory-limited.
 
-If you want, I can add a small notebook cell that runs a safe probe or automatically applies a recommended configuration for T4. I can also include sample `env` lines to replicate the laptop export-friendly environment (`bootstrap.sh`) if you plan to run CPU export.
-
 ---
 
-Acknowledgements: distilled from common PyTorch/PyLightning best-practices and tuned for the `piper` training workflow in `Training.ipynb`.
+**Glossary (acronyms & short terms)**
+
+- OOM — Out Of Memory: the GPU runs out of available memory for allocations; causes runtime errors during forward/backward or optimizer steps.
+- AMP — Automatic Mixed Precision: using 16-bit fused/conditional math to reduce memory and improve throughput while keeping numerical stability (often via PyTorch AMP).
+- GPU — Graphics Processing Unit: accelerator used to run model computations faster than CPU.
+- CPU — Central Processing Unit: general-purpose processor; used for data loading, preprocessing, and some parts of training.
+- IO — Input/Output: disk/network operations (reading audio files, writing caches) that can bottleneck training if slow.
+- cuDNN — CUDA Deep Neural Network library: NVIDIA library that implements efficient primitives for convolutions/RNNs; `torch.backends.cudnn.benchmark` interacts with it.
+- T4 — NVIDIA T4 GPU: a common Colab GPU with 16GB memory and Tensor Cores suited for mixed precision.
+- ONNX — Open Neural Network Exchange: portable format for exporting models to run outside PyTorch.
+- LR — Learning Rate: a hyperparameter controlling the size of optimizer steps; often scaled when changing batch size.
+
+Acknowledgements: distilled from common PyTorch/PyTorch Lightning best-practices and tuned for the `piper` training workflow in `Training.ipynb`.
