@@ -20,7 +20,7 @@ This document explains the performance-oriented parameters used by the `Training
   - What: Number of training examples processed in one forward/backward pass.
   - Performance effect: Directly increases GPU memory use and per-step computation. Larger batch sizes usually increase throughput (samples/sec) because the GPU work is amortized across more samples.
   - Quality effect: Changes effective optimization dynamics. Very large batch sizes can require learning-rate scaling or more epochs for similar generalization.
-  - Practical: If you increase `BATCH_SIZE`, watch for Out Of Memory (OOM) errors. Use gradient accumulation (below) if memory is limiting.
+  - Practical: If you increase `BATCH_SIZE`, watch for Out Of Memory (OOM) errors.
 
 - `SEGMENT_SIZE` (notebook passes to `--model.segment_size`)
   - What: Number of audio samples (or model timesteps) per training segment. Larger segments produce longer contexts per sample.
@@ -36,11 +36,6 @@ This document explains the performance-oriented parameters used by the `Training
   - What: Number of background worker processes used for data loading and preprocessing.
   - Performance effect: Affects CPU->GPU pipeline throughput. Too few workers can make the GPU idle waiting for batches; too many wastes CPU and memory.
   - Practical: On Colab T4, 2–4 is a good starting point. On multi-core machines increase accordingly.
-
-- `ACCUMULATE_GRAD_BATCHES` (gradient accumulation)
-  - What: Accumulates gradients for N steps before applying an optimizer step. Effective batch size = `BATCH_SIZE * ACCUMULATE_GRAD_BATCHES`.
-  - Performance effect: Allows larger effective batch sizes without additional GPU memory. Throughput per optimizer step decreases (more forward/backward passes), but you can reproduce large-batch training dynamics safely.
-  - Quality effect: With correct learning-rate scaling, results are similar to using a larger real batch.
 
 - `--trainer.devices`, `--trainer.accelerator`
   - What: Tells Lightning to use GPU(s) and how many.
@@ -89,7 +84,7 @@ print('reserved', torch.cuda.memory_reserved()/1e9, 'GB')
 
 4. If GPU memory is underused but utilization low and data pipeline is fast:
    - Increase `BATCH_SIZE` stepwise: multiply by 2 (e.g., 4 → 8 → 16) until either utilization improves or you hit OOM.
-   - If OOM occurs, drop back one step and instead set `ACCUMULATE_GRAD_BATCHES` to 2 to double effective batch without more memory.
+  - If OOM occurs, drop back one step and consider reducing `BATCH_SIZE` or `SEGMENT_SIZE`, or switch to `PRECISION='16'`.
 
 5. If the GPU memory is available but utilization still low, increase `SEGMENT_SIZE` in steps (e.g., 4096 → 6144 → 8192). Watch memory growth closely.
 
@@ -97,7 +92,7 @@ print('reserved', torch.cuda.memory_reserved()/1e9, 'GB')
    - If you need more headroom for `BATCH_SIZE`, ensure `PRECISION='16'` to reduce memory.
    - If you want to squeeze more throughput and the model is stable, mixed precision often improves speed on T4.
 
-7. If you want to reproduce larger-batch training dynamics, set `ACCUMULATE_GRAD_BATCHES` and scale learning rate accordingly (linear scaling rule: lr * effective_batch_size / base_batch_size).
+7. If you want to reproduce larger-batch training dynamics, scale the learning rate roughly in proportion to the change in effective batch size (linear scaling rule: lr * effective_batch_size / base_batch_size) and validate on a held-out set.
 
 8. Final validation: ensure training loss and validation metrics behave similarly after tuning. Minor tuning of learning rate may be required when changing `BATCH_SIZE` significantly.
 
@@ -110,14 +105,14 @@ print('reserved', torch.cuda.memory_reserved()/1e9, 'GB')
   - `SEGMENT_SIZE = 4096`
   - `NUM_WORKERS = 2`
   - `PRECISION = '16'`
-  - `ACCUMULATE_GRAD_BATCHES = 1` (use 2 if you want larger effective batch without memory change)
+  - If you need a larger effective batch without increasing per-step memory, prefer lowering precision or splitting work across more steps manually in your training loop.
 
 - Moderate (recommended to test)
   - `BATCH_SIZE = 8` or `16`
   - `SEGMENT_SIZE = 6144`
   - `NUM_WORKERS = 2-4`
   - `PRECISION = '16'`
-  - `ACCUMULATE_GRAD_BATCHES = 1-2`
+  - If more effective batch size is required, adjust precision or reduce segment size and monitor stability.
 
 - Aggressive (higher OOM risk)
   - `BATCH_SIZE = 16+`
@@ -129,10 +124,10 @@ Notes: T4 has 16GB of RAM — the sweet spot often lies in BATCH_SIZE 8–16 and
 
 ---
 
-**5. Advanced knobs and behavior**
+- **5. Advanced knobs and behavior**
 
-- `accumulate_grad_batches` and learning-rate scaling
-  - If you double effective batch size, scale learning rate roughly by 2 (linear scaling). Prefer conservative increases and watch validation.
+- Learning-rate scaling
+  - When changing batch size, scale the learning rate roughly in proportion to the batch change (linear scaling). Prefer conservative adjustments and validate on held-out data.
 
 - CUDNN benchmarking
   - `torch.backends.cudnn.benchmark = True` can improve speed when input sizes are constant. However, it may increase initial CPU time and cause non-deterministic results. Use if you have fixed segment sizes.
@@ -207,7 +202,6 @@ BATCH_SIZE = 8
 NUM_WORKERS = 2
 SEGMENT_SIZE = 6144
 PRECISION = '16'
-ACCUMULATE_GRAD_BATCHES = 1
 ```
 
 In section 3 (the launcher), ensure the CLI args pick up these variables, for example:
@@ -216,8 +210,7 @@ In section 3 (the launcher), ensure the CLI args pick up these variables, for ex
 cli_args += ['--data.batch_size', str(BATCH_SIZE),
              '--data.num_workers', str(NUM_WORKERS),
              '--model.segment_size', str(SEGMENT_SIZE),
-             '--trainer.precision', PRECISION,
-             '--trainer.accumulate_grad_batches', str(ACCUMULATE_GRAD_BATCHES)]
+             '--trainer.precision', PRECISION]
 ```
 
 ---
@@ -226,7 +219,7 @@ cli_args += ['--data.batch_size', str(BATCH_SIZE),
 
 - Start from defaults and change only one variable per experiment.
 - Monitor both GPU memory and GPU utilization (`nvidia-smi`).
-- If OOM occurs, try: reduce `BATCH_SIZE`, reduce `SEGMENT_SIZE`, switch to `PRECISION='16'`, or use `ACCUMULATE_GRAD_BATCHES`.
+ - If OOM occurs, try: reduce `BATCH_SIZE`, reduce `SEGMENT_SIZE`, switch to `PRECISION='16'`.
 - If GPU is underutilized: increase `NUM_WORKERS`, precompute cache, increase `BATCH_SIZE` or `SEGMENT_SIZE` carefully.
 - Re-evaluate model metrics after tuning—throughput gains are worthless if validation degrades.
 
@@ -237,7 +230,7 @@ cli_args += ['--data.batch_size', str(BATCH_SIZE),
 - Don't conflate GPU memory usage with utilization: having mem free doesn't guarantee compute is saturated; check `utilization.gpu`.
 - Mixed precision (`'16'`) is usually safe and yields the best speed/memory trade-off on T4.
 - Data pipeline bottlenecks are very common—use `NUM_WORKERS` and caching aggressively.
-- Use `accumulate_grad_batches` instead of blindly increasing `BATCH_SIZE` when memory-limited.
+ - Prefer changing precision or segment size before increasing batch size further when memory-limited.
 
 ---
 
