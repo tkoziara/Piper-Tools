@@ -14,6 +14,7 @@ when `fetch-base` is used and the package is not available.
 Defaults and safety:
 - Sample rate: 22050 Hz.
 - `train` prints the command by default; use `--run` to execute.
+- Quote normalization: various quotation styles („...", "...", «...») are normalized to ASCII "..." by default.
 """
 
 from __future__ import annotations
@@ -65,15 +66,48 @@ def normalize_audio(src: Path, dst: Path, sample_rate: int = SAMPLE_RATE) -> Non
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def normalize_quotes(text: str) -> str:
+    """Normalize various quotation mark styles to ASCII double quotes.
+
+    Handles:
+    - Polish/curly quotes: „ ... "
+    - English curly quotes: " ... "
+    - French quotes: « ... »
+    - Single curly quotes: ' ... '
+    - Reversed Polish quotes: « ... " (treated as opening)
+    """
+    # Map of opening/closing quote pairs to ASCII double quotes
+    # Order matters: process paired quotes first, then stray singles
+    replacements = [
+        ("„", '"'),  # Polish low-high
+        ("'", '"'),  # Polish/curly high
+        ("'", '"'),  # Curly single close
+        ("'", '"'),  # Curly single open
+        ("«", '"'),  # French/Guillemet open
+        ("»", '"'),  # French/Guillemet close
+        ("‹", '"'),  # Single guillemet open
+        ("›", '"'),  # Single guillemet close
+        ("‟", '"'),  # High-6 quote
+        ("‛", '"'),  # Single high-reversed
+    ]
+    for old, new in replacements:
+        text = text.replace(old, new)
+    return text
+
+
 def collect_transcript_for_audio(audio_path: Path) -> str:
     """Look for transcript files next to the audio or a global transcripts.txt.
 
     If none are found, fall back to the filename (underscores -> spaces) as a placeholder.
+
+    Quote normalization is always applied: various quotation styles („...", "...", «...»)
+    are converted to ASCII double quotes ("...").
     """
     # 1) same-name .txt
     txt_same = audio_path.with_suffix(".txt")
     if txt_same.exists():
-        return txt_same.read_text(encoding="utf-8").strip()
+        text = txt_same.read_text(encoding="utf-8").strip()
+        return normalize_quotes(text)
 
     # 2) transcripts.txt in same directory
     transcripts = audio_path.parent / "transcripts.txt"
@@ -92,7 +126,7 @@ def collect_transcript_for_audio(audio_path: Path) -> str:
                 else:
                     continue
             if Path(name).stem == audio_path.stem:
-                return text.strip()
+                return normalize_quotes(text.strip())
 
     # fallback: create readable text from filename
     return audio_path.stem.replace("_", " ").replace("-", " ")
@@ -137,13 +171,10 @@ def prepare_dataset(samples_dir: Path, out_dir: Path, lang: str, quality: str, n
         rows.append((out_fname, transcript))
 
     # write metadata.csv as: filename|transcript (paths are relative to the audio_dir)
+    # Use CSV writer with proper escaping for quotes (required by Piper's csv.reader)
     with metadata_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f, delimiter="|")
         for fname, text in rows:
-            # prior versions included a "wavs/" prefix which caused the
-            # data loader to look in ".../wavs/wavs/...".  training now
-            # concatenates audio_dir with the value in the CSV, so we only
-            # write the bare filename here.
             writer.writerow([fname, text])
 
     # save a small README with training suggestions
