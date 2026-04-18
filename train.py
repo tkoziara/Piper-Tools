@@ -585,6 +585,8 @@ runpy.run_module('piper.train', run_name='__main__')
 
 def export_onnx(checkpoint: Path, output_file: Path) -> None:
     output_file = output_file.resolve()
+    if output_file.suffix.lower() != ".onnx":
+        output_file = output_file.with_suffix(".onnx")
     cmd = [sys.executable, "-m", "piper.train.export_onnx", "--checkpoint", str(checkpoint), "--output-file", str(output_file)]
     print("Export command:")
     print(" ".join(cmd))
