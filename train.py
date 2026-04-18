@@ -596,38 +596,97 @@ def export_onnx(checkpoint: Path, output_file: Path) -> None:
     # not produce one, synth_test and piper will fail, so generate a minimal
     # fallback using hyperparameters from the checkpoint.
     json_path = output_file.with_suffix(output_file.suffix + ".json")
-    if not json_path.exists():
-        print(f"Exporter did not create {json_path}; generating fallback model config.")
+
+    def _json_invalid(path: Path) -> bool:
+        if not path.exists():
+            return True
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return True
+        if not isinstance(data, dict):
+            return True
+        phoneme_id_map = data.get("phoneme_id_map")
+        return not isinstance(phoneme_id_map, dict) or len(phoneme_id_map) == 0
+
+    if _json_invalid(json_path):
+        print(f"Exporter did not create a valid config at {json_path}; generating fallback model config.")
         try:
             import torch
             from piper.config import PiperConfig, PhonemeType
+            from piper.phoneme_ids import DEFAULT_PHONEME_ID_MAP
+
+            def _find_dataset_config(cp: Path) -> Path | None:
+                current = cp.parent
+                for _ in range(5):
+                    for candidate in ("voice_config.json", "voice_config.dataset.json"):
+                        candidate_path = current / candidate
+                        if candidate_path.exists():
+                            return candidate_path
+                    if current.parent == current:
+                        break
+                    current = current.parent
+
+                stem = cp.stem
+                if stem.endswith("-latest"):
+                    candidate_path = cp.parent / stem[:-7] / "voice_config.json"
+                    if candidate_path.exists():
+                        return candidate_path
+                return None
 
             data = torch.load(str(checkpoint), map_location="cpu", weights_only=False)
-            hp = {}
+            hp: dict = {}
             if isinstance(data, dict):
                 hp = data.get("hyper_parameters", {}) or data.get("hparams", {}) or {}
 
-            # attempt to read espeak_voice from dataset config if available
+            config_file = _find_dataset_config(checkpoint)
+            config_map = None
+            if config_file is not None:
+                try:
+                    config_map = json.load(open(config_file, "r", encoding="utf-8"))
+                except Exception:
+                    config_map = None
+
             espeak = None
-            try:
-                ds_cfg = json.load(open(Path(checkpoint).parents[3] / "voice_config.dataset.json"))
-                espeak = ds_cfg.get("data", {}).get("espeak_voice")
-            except Exception:
-                pass
+            phoneme_type = PhonemeType.ESPEAK
+            phoneme_id_map = None
+            if config_map is not None and isinstance(config_map, dict):
+                espeak = (
+                    config_map.get("data", {}).get("espeak_voice")
+                    or config_map.get("espeak", {}).get("voice")
+                )
+                phoneme_type_value = config_map.get("phoneme_type")
+                if phoneme_type_value:
+                    try:
+                        phoneme_type = PhonemeType(phoneme_type_value)
+                    except ValueError:
+                        phoneme_type = PhonemeType.ESPEAK
+                map_from_cfg = config_map.get("phoneme_id_map")
+                if isinstance(map_from_cfg, dict) and map_from_cfg:
+                    phoneme_id_map = map_from_cfg
+
             if not espeak:
-                # fallback based on sample rate or language guess
                 espeak = "pl" if "pl" in str(checkpoint) else "en-us"
+
+            if phoneme_id_map is None:
+                if phoneme_type == PhonemeType.PINYIN:
+                    from piper.phonemize_chinese import PHONEME_TO_ID
+
+                    phoneme_id_map = PHONEME_TO_ID
+                else:
+                    phoneme_id_map = DEFAULT_PHONEME_ID_MAP
 
             cfg_obj = PiperConfig(
                 num_symbols=hp.get("num_symbols", 256),
                 num_speakers=hp.get("num_speakers", 1),
                 sample_rate=hp.get("sample_rate", SAMPLE_RATE),
                 espeak_voice=espeak,
-                phoneme_id_map={},
-                phoneme_type=PhonemeType.ESPEAK,
+                phoneme_id_map=phoneme_id_map,
+                phoneme_type=phoneme_type,
             )
-            # speaker_id_map defaults to {}
             cfg = cfg_obj.to_dict()
+            cfg.setdefault("phoneme_map", {})
             with json_path.open("w", encoding="utf-8") as f:
                 json.dump(cfg, f, indent=2)
             print("Wrote fallback model config to", json_path)
