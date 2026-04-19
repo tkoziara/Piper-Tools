@@ -583,7 +583,7 @@ runpy.run_module('piper.train', run_name='__main__')
         subprocess.run([sys.executable, "-c", snippet], check=True)
 
 
-def export_onnx(checkpoint: Path, output_file: Path) -> None:
+def export_onnx(checkpoint: Path, output_file: Path, espeak_voice: Optional[str] = None) -> None:
     output_file = output_file.resolve()
     if output_file.suffix.lower() != ".onnx":
         output_file = output_file.with_suffix(".onnx")
@@ -648,13 +648,14 @@ def export_onnx(checkpoint: Path, output_file: Path) -> None:
                 except Exception:
                     config_map = None
 
-            espeak = None
+            espeak = espeak_voice
             phoneme_type = PhonemeType.ESPEAK
             phoneme_id_map = None
             if config_map is not None and isinstance(config_map, dict):
                 espeak = (
                     config_map.get("data", {}).get("espeak_voice")
                     or config_map.get("espeak", {}).get("voice")
+                    or espeak
                 )
                 phoneme_type_value = config_map.get("phoneme_type")
                 if phoneme_type_value:
@@ -667,7 +668,7 @@ def export_onnx(checkpoint: Path, output_file: Path) -> None:
                     phoneme_id_map = map_from_cfg
 
             if not espeak:
-                espeak = "pl" if "pl" in str(checkpoint) else "en-us"
+                espeak = "pl" if "pl" in str(checkpoint) else "en-gb"
 
             if phoneme_id_map is None:
                 if phoneme_type == PhonemeType.PINYIN:
@@ -903,6 +904,7 @@ def main():
     p_export = sub.add_parser("export", help="Export a trained checkpoint to ONNX")
     p_export.add_argument("--checkpoint", type=Path, required=True, help="Path to a .ckpt checkpoint")
     p_export.add_argument("--output", type=Path, required=True, help="Output .onnx file path")
+    p_export.add_argument("--espeak-voice", type=str, default=None, help="Override espeak voice for export fallback config")
 
     # synth-test
     p_synth = sub.add_parser("synth-test", help="Synthesize a test WAV from an exported model")
@@ -960,7 +962,7 @@ def main():
         synth_test_checkpoint(args.checkpoint, args.text, args.out_file, espeak_voice=args.espeak_voice)
 
     elif args.cmd == "export":
-        export_onnx(args.checkpoint, args.output)
+        export_onnx(args.checkpoint, args.output, espeak_voice=args.espeak_voice)
 
     elif args.cmd == "synth-test":
         synth_test(args.model, args.text, args.out_file)
