@@ -385,7 +385,7 @@ def fetch_base_checkpoint(dest_dir: Path, quality: str = "medium", model_id: Opt
     return target
 
 
-def build_train_command(out_dir: Path, ckpt_path: Path, voice_name: str, quality: str, gpu: bool, epochs: int | None = None, batch_size: int | None = None, num_workers: int | None = None, espeak_voice: Optional[str] = None, config_path: Optional[Path] = None) -> List[str]:
+def build_train_command(out_dir: Path, ckpt_path: Path, voice_name: str, quality: str, gpu: bool, epochs: int | None = None, batch_size: int | None = None, num_workers: int | None = None, espeak_voice: Optional[str] = None, shuffle_mode: str = 'strong', config_path: Optional[Path] = None) -> List[str]:
     preset = quality_presets(quality)
     if epochs is not None:
         # user override; adjust preset value so that later code uses it
@@ -442,6 +442,8 @@ def build_train_command(out_dir: Path, ckpt_path: Path, voice_name: str, quality
         str(preset["batch_size"]),
         "--data.num_workers",
         str(num_workers) if num_workers is not None else "0",
+        "--data.shuffle_mode",
+        str(shuffle_mode),
         "--data.espeak_voice",
         str(espeak_voice),
         "--ckpt_path",
@@ -896,6 +898,9 @@ def main():
                          help="Override batch size (otherwise derived from quality preset)")
     p_train.add_argument("--num-workers", type=int, default=None,
                          help="Override DataLoader num_workers (default: auto / set by wrapper)")
+    p_train.add_argument("--shuffle-mode", type=str, default="strong",
+                         choices=["strong", "normal", "weak", "off"],
+                         help="Shuffle rigor for training data ordering.")
     p_train.add_argument("--espeak-voice", type=str, default=None,
                          help="Override espeak voice (e.g. 'pl' or 'en-us').  The wrapper will set this automatically based on language.")
     p_train.add_argument("--run", action="store_true", help="Execute the training command")
@@ -956,6 +961,7 @@ def main():
             batch_size=args.batch_size,
             num_workers=args.num_workers,
             espeak_voice=args.espeak_voice,
+            shuffle_mode=args.shuffle_mode,
         )
 
     elif args.cmd == "synth-checkpoint":
