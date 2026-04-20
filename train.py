@@ -668,7 +668,7 @@ def export_onnx(checkpoint: Path, output_file: Path, espeak_voice: Optional[str]
                     phoneme_id_map = map_from_cfg
 
             if not espeak:
-                espeak = "pl" if "pl" in str(checkpoint) else "en-gb"
+                espeak = "pl" if "pl" in str(checkpoint) else "en-us"
 
             if phoneme_id_map is None:
                 if phoneme_type == PhonemeType.PINYIN:
