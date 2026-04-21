@@ -1,9 +1,9 @@
 # Training tuning & GPU performance handbook
 
-This document explains the performance-oriented parameters used by the `Training.ipynb` notebook and the `piper` training launcher. It is written for someone new to machine learning who wants to maximize GPU utilization while preserving model quality. Read through the short primer, then use the concrete tuning steps and examples for incremental testing on your T4 GPU.
+This document explains the performance-oriented parameters used by the training notebooks (`Training_EN.ipynb` / `Training_PL.ipynb`) and the `piper` training launcher. It is written for someone new to machine learning who wants to maximize GPU utilization while preserving model quality. Read through the short primer, then use the concrete tuning steps and examples for incremental testing on your T4 GPU.
 
 **Quick links**
-- Notebook: `Training.ipynb`
+- Notebooks: `Training_EN.ipynb`, `Training_PL.ipynb`
 
 **Goals**
 - Understand what the main parameters do.
@@ -37,6 +37,11 @@ This document explains the performance-oriented parameters used by the `Training
   - Performance effect: Affects CPU->GPU pipeline throughput. Too few workers can make the GPU idle waiting for batches; too many wastes CPU and memory.
   - Practical: On Colab T4, 2–4 is a good starting point. On multi-core machines increase accordingly.
 
+- `LEARNING_RATE`, `LEARNING_RATE_D`, `LR_DECAY`, `LR_DECAY_D`
+  - What: Optimizer hyperparameters controlling the generator/discriminator step sizes and exponential decay schedule.
+  - Performance effect: Higher learning rates can speed early convergence but increase the risk of instability; smaller decay values slow learning more gradually.
+  - Practical: The notebook exposes manual defaults and also supports optional named phase presets that override these values.
+
 - `--trainer.devices`, `--trainer.accelerator`
   - What: Tells Lightning to use GPU(s) and how many.
   - Performance effect: Using the correct accelerator and device count ensures GPU use. Multi-GPU requires distributed setup.
@@ -64,6 +69,7 @@ Tip: If GPU memory is low but utilization is low (e.g., 5GB used, 5–20% utiliz
 **3. Safe incremental tuning procedure (recommended)**
 
 1. Baseline: run the training with the notebook defaults (`BATCH_SIZE` from section 2, `NUM_WORKERS=0`, `SEGMENT_SIZE=4096`, `PRECISION='16'`) and confirm a successful step or two.
+   - Optional: if the notebook provides a `TRAINING_PHASE` override cell, set it to `alignment`, `core_training`, `consolidation`, or `fine_tuning` and rerun cell 2.2 to apply a named schedule.
 2. Monitor the GPU and memory in a separate cell/terminal:
 
 ```bash
@@ -105,6 +111,7 @@ print('reserved', torch.cuda.memory_reserved()/1e9, 'GB')
   - `SEGMENT_SIZE = 4096`
   - `NUM_WORKERS = 2`
   - `PRECISION = '16'`
+  - `LEARNING_RATE = 2e-4`, `LR_DECAY = 0.999875`
   - If you need a larger effective batch without increasing per-step memory, prefer lowering precision or splitting work across more steps manually in your training loop.
 
 - Moderate (recommended to test)
@@ -202,6 +209,9 @@ BATCH_SIZE = 8
 NUM_WORKERS = 2
 SEGMENT_SIZE = 6144
 PRECISION = '16'
+LEARNING_RATE = 2e-4
+LR_DECAY = 0.999875
+# Optionally override with TRAINING_PHASE = 'alignment' or similar in the phase presets cell
 ```
 
 In section 3 (the launcher), ensure the CLI args pick up these variables, for example:
@@ -210,7 +220,9 @@ In section 3 (the launcher), ensure the CLI args pick up these variables, for ex
 cli_args += ['--data.batch_size', str(BATCH_SIZE),
              '--data.num_workers', str(NUM_WORKERS),
              '--model.segment_size', str(SEGMENT_SIZE),
-             '--trainer.precision', PRECISION]
+             '--trainer.precision', PRECISION,
+             '--model.learning_rate', str(LEARNING_RATE),
+             '--model.lr_decay', str(LR_DECAY)]
 ```
 
 ---
