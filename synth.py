@@ -10,6 +10,7 @@ import subprocess
 import sys
 import argparse
 import shutil
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -267,23 +268,99 @@ def synth(voice_name: str, text: str, outpath: Path, voices_dir: Path):
             stderr=completed.stderr,
         )
 
+def synth_checkpoint(checkpoint: Path, text: str, out_file: Path, espeak_voice: str = "en-us") -> None:
+    checkpoint = checkpoint.resolve()
+    out_file = out_file.resolve()
+
+    import torch
+    from piper.phoneme_ids import phonemes_to_ids
+    from piper.phonemize_espeak import EspeakPhonemizer
+    from piper.train.vits.lightning import VitsModel
+
+    print(f"Synthesizing from checkpoint: {checkpoint}")
+    model = VitsModel.load_from_checkpoint(checkpoint, map_location="cpu")
+    model.eval()
+
+    model_g = model.model_g
+    with torch.no_grad():
+        try:
+            model_g.dec.remove_weight_norm()
+        except Exception:
+            pass
+
+        phonemizer = EspeakPhonemizer()
+        phoneme_lists = phonemizer.phonemize(espeak_voice, text)
+        phonemes = [p for sentence in phoneme_lists for p in sentence]
+        ids = phonemes_to_ids(phonemes)
+
+        if len(ids) == 0:
+            raise ValueError("No phonemes generated for text")
+
+        text_tensor = torch.LongTensor(ids).unsqueeze(0)
+        text_lengths = torch.LongTensor([text_tensor.size(1)])
+
+        scales = torch.FloatTensor([0.667, 1.0, 0.8])
+
+        sid = None
+        try:
+            n_speakers = model.model_g.n_speakers
+        except Exception:
+            n_speakers = 1
+
+        if n_speakers > 1:
+            sid = torch.LongTensor([0])
+
+        out_audio, _, _, _ = model_g.infer(
+            text_tensor,
+            text_lengths,
+            sid=sid,
+            noise_scale=scales[0],
+            length_scale=scales[1],
+            noise_scale_w=scales[2],
+        )
+
+    out_audio = out_audio.squeeze().cpu().numpy()
+    out_audio = (out_audio * 32767.0).clip(-32768, 32767).astype('int16')
+
+    import wave
+
+    sample_rate = 22050
+    if hasattr(model.model_g, 'sample_rate'):
+        sample_rate = model.model_g.sample_rate
+    else:
+        hparams_obj = getattr(model.model_g, 'hparams', None) or getattr(model, 'hparams', None)
+        if hparams_obj is not None:
+            try:
+                sample_rate = int(getattr(hparams_obj, 'sample_rate', hparams_obj.get('sample_rate', SAMPLE_RATE)))
+            except Exception:
+                sample_rate = SAMPLE_RATE
+
+    with wave.open(str(out_file), 'wb') as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(int(sample_rate))
+        wav_file.writeframes(out_audio.tobytes())
+
+    print(f"Wrote checkpoint synth output to {out_file}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Simple wrapper around `piper` for synthesizing text."
     )
-    parser.add_argument("--model", type=Path, default=None,
-                        help="Path to an ONNX model file. If provided the "
-                             "script will invoke train.py synth-test on that "
-                             "file (preferred for intermediate checkpoints).")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--voice", "-m", type=str, default=None,
                         help="Voice/model name or list number (e.g. 5 or en_US-lessac-medium). "
                              "The script will also resolve known aliases from the "
-                             "remote piper-voices index. Ignored if --model is given.")
+                             "remote piper-voices index.")
+    group.add_argument("--model", type=Path, default=None,
+                        help="Path to an ONNX model file or directory containing an ONNX model plus JSON config.")
+    group.add_argument("--ckpt", type=Path, default=None,
+                        help="Path to a .ckpt checkpoint for direct synthesis.")
     parser.add_argument("--text", "-t", type=str, default=None,
                         help="Text string to synthesize. If omitted the script "
                              "will read sample_en.txt or sample_pl.txt based on "
-                             "language deduced from the voice name.")
+                             "language deduced from the voice name or checkpoint path.")
     parser.add_argument("--out-file", "-f", type=Path, default=None,
                         help="Output WAV file path. Defaults to out_<lang>.wav")
     parser.add_argument("--voices-dir", type=Path, default=VOICES_DIR,
@@ -309,31 +386,72 @@ def main():
     if args.voice is not None and voice_index is not None:
         args.voice = resolve_voice_selection(args.voice, voice_index, alias_map)
 
-    # if a concrete onnx model was provided, delegate to train.py synth-test
+    # if a concrete ONNX model was provided, synthesize directly from it
     if args.model is not None:
         model_path = args.model.resolve()
         if not model_path.exists():
             raise SystemExit(f"Model file not found: {model_path}")
-        # decide output
         if args.out_file is not None:
             outpath = args.out_file
         else:
             outpath = ROOT / (model_path.stem + ".wav")
-        # build command
-        cmd = [
-            sys.executable,
-            "train.py",
-            "synth-test",
-            "--model",
-            str(model_path),
-            "--text",
-            args.text or "",
-            "--out-file",
-            str(outpath),
-        ]
-        print("Running synth-test via train.py:", " ".join(cmd))
+        if args.text is None:
+            sample_file = ROOT / "sample_en.txt"
+            if not sample_file.exists():
+                raise SystemExit("No sample text available; use --text to provide a sentence.")
+            text = sample_file.read_text(encoding="utf-8").strip()
+        else:
+            text = args.text
+        print(f"Synthesizing ONNX model {model_path} to {outpath}...")
+        synth_model = args.model
+        if synth_model.is_dir():
+            model_dir = synth_model
+            onnx_files = list(model_dir.glob("*.onnx"))
+            if not onnx_files:
+                raise SystemExit(f"No .onnx file found in {model_dir}")
+            model_file = onnx_files[0]
+            tmp = model_dir
+        else:
+            model_file = synth_model
+            tmp = Path(tempfile.mkdtemp(prefix="piper_synth_"))
+            shutil.copy2(str(model_file), str(tmp / model_file.name))
+            json_conf = model_file.with_suffix(model_file.suffix + ".json")
+            if not json_conf.exists():
+                dsbackup = model_file.parent / "voice_config.dataset.json"
+                if dsbackup.exists():
+                    print("Model JSON missing; copying dataset backup for synth.")
+                    json_conf = dsbackup
+            if json_conf.exists():
+                shutil.copy2(str(json_conf), str(tmp / json_conf.name))
+            model_dir = tmp
+        model_name = model_file.stem
+        cmd = [sys.executable, "-m", "piper", "-m", model_name, "--data-dir", str(model_dir), "-f", str(outpath), "--", text]
+        print("Running:", " ".join(cmd))
         subprocess.run(cmd, check=True)
         print("Done.")
+        if args.play:
+            play_file(outpath)
+        return
+
+    if args.ckpt is not None:
+        ckpt_path = args.ckpt.resolve()
+        if not ckpt_path.exists():
+            raise SystemExit(f"Checkpoint file not found: {ckpt_path}")
+        if args.out_file is not None:
+            outpath = args.out_file
+        else:
+            outpath = ROOT / (ckpt_path.stem + ".wav")
+        if args.text is None:
+            text = ROOT / "sample_en.txt"
+            if "pl" in str(ckpt_path).lower():
+                text = ROOT / "sample_pl.txt"
+            if not text.exists():
+                raise SystemExit("No sample text available; use --text to provide a sentence.")
+            text = text.read_text(encoding="utf-8").strip()
+        else:
+            text = args.text
+        espeak_voice = "pl" if "pl" in str(ckpt_path).lower() else "en-us"
+        synth_checkpoint(ckpt_path, text, outpath, espeak_voice=espeak_voice)
         if args.play:
             play_file(outpath)
         return
