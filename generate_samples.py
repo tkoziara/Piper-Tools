@@ -72,6 +72,79 @@ def load_whisper_model(model_name: str):
         raise SystemExit(f"Failed to load Whisper model '{model_name}': {exc}") from exc
 
 
+def parse_padding(value: str) -> float:
+    padding = float(value)
+    if padding < 0.1:
+        raise argparse.ArgumentTypeError("padding must be at least 0.1 seconds")
+    return padding
+
+
+def get_audio_duration(path: Path) -> float:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    proc = subprocess.run(
+        cmd,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return float(proc.stdout.strip())
+
+
+def detect_trailing_silence_start(
+    path: Path,
+    silence_threshold: str = "-40dB",
+    silence_duration: float = 0.1,
+) -> Optional[float]:
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        str(path),
+        "-af",
+        f"silencedetect=noise={silence_threshold}:d={silence_duration}",
+        "-f",
+        "null",
+        "-",
+    ]
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    duration = get_audio_duration(path)
+    last_silence_start: Optional[float] = None
+    last_silence_end: Optional[float] = None
+    for line in proc.stderr.splitlines():
+        silence_start = re.search(r"silence_start: (\d+(?:\.\d+)?)", line)
+        if silence_start:
+            last_silence_start = float(silence_start.group(1))
+            last_silence_end = None
+        silence_end = re.search(r"silence_end: (\d+(?:\.\d+)?).*", line)
+        if silence_end:
+            last_silence_end = float(silence_end.group(1))
+    if last_silence_start is None:
+        return None
+    if last_silence_end is not None:
+        if last_silence_end >= duration - 0.05:
+            return last_silence_start
+        return None
+    if last_silence_start >= duration - 0.05:
+        return last_silence_start
+    return None
+
+
 def normalize_audio_segment(
     src: Path,
     dst: Path,
@@ -86,24 +159,64 @@ def normalize_audio_segment(
     padded_end = max(padded_start, end + padding)
     if max_end is not None:
         padded_end = min(padded_end, max_end)
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(src),
-        "-ss",
-        str(padded_start),
-        "-to",
-        str(padded_end),
-        "-ar",
-        str(sample_rate),
-        "-ac",
-        "1",
-        "-acodec",
-        "pcm_s16le",
-        str(dst),
-    ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+        temp_path = Path(tmp_file.name)
+
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(src),
+            "-ss",
+            str(padded_start),
+            "-to",
+            str(padded_end),
+            "-ar",
+            str(sample_rate),
+            "-ac",
+            "1",
+            "-acodec",
+            "pcm_s16le",
+            str(temp_path),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    final_end: Optional[float] = None
+    trailing_silence_start = detect_trailing_silence_start(temp_path)
+    if trailing_silence_start is not None:
+        final_end = min(padded_end - padded_start, trailing_silence_start + padding)
+
+    if final_end is None or final_end >= (padded_end - padded_start) - 0.01:
+        shutil.move(temp_path, dst)
+    else:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(temp_path),
+                "-ss",
+                "0",
+                "-to",
+                str(final_end),
+                "-ar",
+                str(sample_rate),
+                "-ac",
+                "1",
+                "-acodec",
+                "pcm_s16le",
+                str(dst),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        temp_path.unlink()
 
 
 def split_text_into_sentences(text: str) -> Tuple[List[str], str]:
@@ -429,7 +542,7 @@ def main() -> None:
     parser.add_argument("--scratch-dir", type=Path, default=None, help="Scratch directory for temporary segments and resume state.")
     parser.add_argument("--model", type=str, default=None, help="Whisper model to use: tiny, base, small, medium, large.")
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE, help="Output WAV sample rate.")
-    parser.add_argument("--padding", type=float, default=DEFAULT_PADDING, help="Seconds of padding to add before/after each extracted sample.")
+    parser.add_argument("--padding", type=parse_padding, default=DEFAULT_PADDING, help="Seconds of padding to add before/after each extracted sample (minimum 0.1).")
     parser.add_argument("--approve-all", action="store_true", help="Auto-approve all detected samples and skip interactive review.")
     parser.add_argument("--resume", action="store_true", help="Resume a previously saved approval session in the scratch directory.")
     parser.add_argument("--recursive", action="store_true", help="Scan input directories recursively.")
