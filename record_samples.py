@@ -3,9 +3,9 @@
 
 Usage: python record_samples.py --lang en|pl /path/to/dir
 
-Starts a server on localhost:8765.  Open the page in a browser, record your
-voice, edit the recognized sentence and save.  WAV+TXT pair will be created in
-specified directory as SampleN.(wav,txt) for English or ProbkaN.* for Polish.
+Starts a server on localhost:8765. Open the page in a browser, record your
+voice, edit the recognized sentence and save. WAV+TXT pairs are created in
+specified directory as sample_N.(wav,txt) regardless of language.
 
 Dependencies (installed by setup_venv.sh):
     flask whisper
@@ -37,10 +37,7 @@ app = Flask(__name__)
 args = None
 model = None
 
-PREFIX = {"en": "Sample", "pl": "Probka"}
-
-# helper to pick next available index
-num_re = re.compile(r"{}(\d+)\.wav".format(re.escape('%s')))
+SAMPLE_PREFIX = "sample_"
 
 def next_index(dest: Path, prefix: str) -> int:
     """Return next integer index for prefix in dest directory."""
@@ -56,6 +53,7 @@ def next_index(dest: Path, prefix: str) -> int:
                 except ValueError:
                     pass
     return highest + 1
+
 
 @app.route("/", methods=["GET"])
 def index():
@@ -157,10 +155,9 @@ def save():
     f.save(tmp.name)
     dest = Path(args.dest)
     dest.mkdir(parents=True, exist_ok=True)
-    prefix = PREFIX.get(args.lang,'Sample')
-    idx = next_index(dest, prefix)
-    wavpath = dest / f"{prefix}{idx}.wav"
-    txtpath = dest / f"{prefix}{idx}.txt"
+    idx = next_index(dest, SAMPLE_PREFIX)
+    wavpath = dest / f"{SAMPLE_PREFIX}{idx}.wav"
+    txtpath = dest / f"{SAMPLE_PREFIX}{idx}.txt"
     # convert to wav
     subprocess.run(['ffmpeg','-y','-i',tmp.name,'-ar','22050','-ac','1',str(wavpath)],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -176,6 +173,7 @@ def main():
     parser.add_argument('--lang', choices=['en','pl'], required=True)
     parser.add_argument('dest', help='directory to save samples')
     args = parser.parse_args()
+
     print(f"Loading whisper model (this may take a moment)")
     model = whisper.load_model('base')
     port = 8765 if args.lang == 'en' else 8764
