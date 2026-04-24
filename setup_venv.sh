@@ -78,7 +78,7 @@ $PIP_INSTALL pip setuptools wheel
 # include onnxscript which PyTorch's ONNX exporter may require
 # note: the PyPI package "whisper" is unrelated (RRDtool), so uninstall
 # it first to avoid conflicts and then install OpenAI's model.
-$PIP_INSTALL piper-tts onnxruntime onnx onnxscript flask
+$PIP_INSTALL piper-tts onnxruntime onnx onnxscript flask deepfilternet
 # safe-removal of wrong whisper
 $PIP uninstall -y whisper || true
 $PIP_INSTALL "openai-whisper"
