@@ -17,8 +17,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 DEFAULT_SAMPLE_RATE = 22050
+DEFAULT_PADDING = 0.20
 SUPPORTED_AUDIO_EXTS = {".wav", ".mp3"}
-SENTENCE_REGEX = re.compile(r"([^.!?]*[.!?])")
+SENTENCE_REGEX = re.compile(r"(.+?[.!?])(?:\s+|$)", re.DOTALL)
 SESSION_FILENAME = "session.json"
 CANDIDATE_PREFIX = "candidate_"
 
@@ -71,17 +72,29 @@ def load_whisper_model(model_name: str):
         raise SystemExit(f"Failed to load Whisper model '{model_name}': {exc}") from exc
 
 
-def normalize_audio_segment(src: Path, dst: Path, start: float, end: float, sample_rate: int) -> None:
+def normalize_audio_segment(
+    src: Path,
+    dst: Path,
+    start: float,
+    end: float,
+    sample_rate: int,
+    padding: float = 0.0,
+    max_end: Optional[float] = None,
+) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
+    padded_start = max(0.0, start - padding)
+    padded_end = max(padded_start, end + padding)
+    if max_end is not None:
+        padded_end = min(padded_end, max_end)
     cmd = [
         "ffmpeg",
         "-y",
         "-i",
         str(src),
         "-ss",
-        str(start),
+        str(padded_start),
         "-to",
-        str(end),
+        str(padded_end),
         "-ar",
         str(sample_rate),
         "-ac",
@@ -174,6 +187,7 @@ def make_candidate_files(
     candidates: List[Dict[str, Any]],
     scratch_dir: Path,
     sample_rate: int,
+    padding: float,
 ) -> List[Dict[str, Any]]:
     audio_base = audio_path.stem
     candidate_dir = scratch_dir / "candidates"
@@ -183,7 +197,14 @@ def make_candidate_files(
         base_name = f"{CANDIDATE_PREFIX}{idx}"
         wav_path = candidate_dir / f"{base_name}.wav"
         txt_path = candidate_dir / f"{base_name}.txt"
-        normalize_audio_segment(audio_path, wav_path, candidate["start"], candidate["end"], sample_rate)
+        normalize_audio_segment(
+            audio_path,
+            wav_path,
+            candidate["start"],
+            candidate["end"],
+            sample_rate,
+            padding=padding,
+        )
         txt_path.write_text(candidate["text"], encoding="utf-8")
         result.append(
             {
@@ -325,6 +346,7 @@ def build_session_from_audio(
     language: Optional[str],
     sample_rate: int,
     scratch_dir: Path,
+    padding: float,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     model = load_whisper_model(model_name)
     recordings: List[Dict[str, Any]] = []
@@ -368,12 +390,25 @@ def build_session_from_audio(
         candidate_id += 1
     candidate_dir = scratch_dir / "candidates"
     candidate_dir.mkdir(parents=True, exist_ok=True)
-    for candidate in all_candidates:
+    for idx, candidate in enumerate(all_candidates):
         source = Path(candidate["source"])
         base_name = f"{CANDIDATE_PREFIX}{candidate['id']}"
         wav_path = candidate_dir / f"{base_name}.wav"
         txt_path = candidate_dir / f"{base_name}.txt"
-        normalize_audio_segment(source, wav_path, candidate["start"], candidate["end"], sample_rate)
+        next_start = None
+        if idx + 1 < len(all_candidates):
+            next_candidate = all_candidates[idx + 1]
+            if next_candidate["source"] == candidate["source"]:
+                next_start = next_candidate["start"] - padding
+        normalize_audio_segment(
+            source,
+            wav_path,
+            candidate["start"],
+            candidate["end"],
+            sample_rate,
+            padding=padding,
+            max_end=next_start
+        )
         txt_path.write_text(candidate["text"], encoding="utf-8")
         candidate["wav_path"] = str(wav_path)
         candidate["txt_path"] = str(txt_path)
@@ -394,6 +429,7 @@ def main() -> None:
     parser.add_argument("--scratch-dir", type=Path, default=None, help="Scratch directory for temporary segments and resume state.")
     parser.add_argument("--model", type=str, default=None, help="Whisper model to use: tiny, base, small, medium, large.")
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE, help="Output WAV sample rate.")
+    parser.add_argument("--padding", type=float, default=DEFAULT_PADDING, help="Seconds of padding to add before/after each extracted sample.")
     parser.add_argument("--approve-all", action="store_true", help="Auto-approve all detected samples and skip interactive review.")
     parser.add_argument("--resume", action="store_true", help="Resume a previously saved approval session in the scratch directory.")
     parser.add_argument("--recursive", action="store_true", help="Scan input directories recursively.")
@@ -422,6 +458,7 @@ def main() -> None:
             args.lang,
             args.sample_rate,
             scratch_dir,
+            args.padding,
         )
         session = {
             "language": language,
