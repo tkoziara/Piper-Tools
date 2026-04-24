@@ -150,4 +150,4 @@ echo "Bootstrap complete."
 echo "activate with: source .venv/bin/activate"
 
 echo "To train sample data, run: python train.py init --samples-dir ../samples --out-dir training_pl --lang pl"
-echo "Then: ./train_and_export.sh --out-dir training_pl --voice-name tomek_pl --quality medium --yes --epochs 3 --rounds 3"
+echo "Then: ./train.sh train --out-dir training_pl --voice-name tomek_pl --quality medium --epochs 3 --run"

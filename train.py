@@ -2,14 +2,12 @@
 """Simplified Piper training runner.
 
 Commands implemented:
-- `init` / `prepare`: normalize audio, build `wavs/` and `metadata.csv` ready for Piper training.
-- `fetch-base`: download a Piper checkpoint (from Hugging Face `rhasspy/piper-checkpoints`) if needed.
+- `init`: normalize audio, build `wavs/` and `metadata.csv` ready for Piper training.
 - `train`: print or run `python3 -m piper.train fit` using sensible quality presets.
 - `export`: export a trained checkpoint to ONNX using Piper's export helper.
-- `synth-test`: synthesize a test WAV from an exported ONNX model using `python3 -m piper`.
 
 This script will attempt to `pip install huggingface_hub` in the active venv
-when `fetch-base` is used and the package is not available.
+when a base checkpoint must be downloaded and the package is not available.
 
 Defaults and safety:
 - Sample rate: 22050 Hz.
@@ -191,17 +189,16 @@ provided in this repository:
 
 * run the helper script (preferred):
 
-    ./train_and_export.sh --out-dir <path> --voice-name <name> \
-        [--quality medium] [--epochs N] [--rounds R] [--yes]
+    ./train.sh --out-dir <path> --voice-name <name> \
+        [--quality medium] [--epochs N] [--run]
 
-  this will fetch a base checkpoint if necessary, execute training (optionally),
-  export ONNX models after each round and synth‑test a short sample.
+  this will fetch a base checkpoint if necessary and execute training.
 
 * call the `train.py` commands directly, e.g.:
 
     python3 train.py train --out-dir <path> --ckpt ~/.piper/checkpoints/medium/base_checkpoint.ckpt --voice-name <name> [--run]
     python3 train.py export --checkpoint <ckpt> --output <file>.onnx
-    python3 train.py synth-test --model <file>.onnx --text "..."
+    python3 synth.py --model <file>.onnx --text "..."
 
 See the repository's `TRAIN.md` document for full details and troubleshooting.
 """)
@@ -234,11 +231,41 @@ See the repository's `TRAIN.md` document for full details and troubleshooting.
 def quality_presets(quality: str) -> Dict[str, str]:
     q = quality.lower()
     if q == "low":
-        return {"epochs": "50", "batch_size": "32", "notes": "fast, low quality"}
+        return {
+            "epochs": "50",
+            "batch_size": "32",
+            "learning_rate": "2e-4",
+            "learning_rate_d": "1e-4",
+            "lr_decay": "0.999875",
+            "lr_decay_d": "0.9999",
+            "segment_size": "4096",
+            "precision": "16",
+            "notes": "fast, low quality",
+        }
     if q == "high":
-        return {"epochs": "400", "batch_size": "8", "notes": "high quality, slow"}
+        return {
+            "epochs": "400",
+            "batch_size": "8",
+            "learning_rate": "2e-4",
+            "learning_rate_d": "1e-4",
+            "lr_decay": "0.999875",
+            "lr_decay_d": "0.9999",
+            "segment_size": "6144",
+            "precision": "16",
+            "notes": "high quality, slow",
+        }
     # default medium
-    return {"epochs": "200", "batch_size": "16", "notes": "balanced"}
+    return {
+        "epochs": "200",
+        "batch_size": "16",
+        "learning_rate": "2e-4",
+        "learning_rate_d": "1e-4",
+        "lr_decay": "0.999875",
+        "lr_decay_d": "0.9999",
+        "segment_size": "6144",
+        "precision": "16",
+        "notes": "balanced",
+    }
 
 
 def ensure_hf_hub_installed() -> None:
@@ -385,16 +412,51 @@ def fetch_base_checkpoint(dest_dir: Path, quality: str = "medium", model_id: Opt
     return target
 
 
-def build_train_command(out_dir: Path, ckpt_path: Path, voice_name: str, quality: str, gpu: bool, epochs: int | None = None, batch_size: int | None = None, num_workers: int | None = None, espeak_voice: Optional[str] = None, shuffle_mode: str = 'strong', config_path: Optional[Path] = None) -> List[str]:
+def build_train_command(
+    out_dir: Path,
+    ckpt_path: Path,
+    voice_name: str,
+    quality: str,
+    gpu: bool,
+    epochs: int | None = None,
+    batch_size: int | None = None,
+    num_workers: int | None = None,
+    espeak_voice: Optional[str] = None,
+    shuffle_mode: str = 'strong',
+    sample_rate: int | None = None,
+    learning_rate: float | None = None,
+    learning_rate_d: float | None = None,
+    lr_decay: float | None = None,
+    lr_decay_d: float | None = None,
+    segment_size: int | None = None,
+    precision: str | None = None,
+    config_path: Optional[Path] = None,
+) -> List[str]:
     preset = quality_presets(quality)
     if epochs is not None:
-        # user override; adjust preset value so that later code uses it
         preset = dict(preset)
-        preset["epochs"] = epochs
+        preset["epochs"] = str(epochs)
     if batch_size is not None:
-        # override the preset batch size
         preset = dict(preset)
         preset["batch_size"] = str(batch_size)
+    if learning_rate is not None:
+        preset = dict(preset)
+        preset["learning_rate"] = str(learning_rate)
+    if learning_rate_d is not None:
+        preset = dict(preset)
+        preset["learning_rate_d"] = str(learning_rate_d)
+    if lr_decay is not None:
+        preset = dict(preset)
+        preset["lr_decay"] = str(lr_decay)
+    if lr_decay_d is not None:
+        preset = dict(preset)
+        preset["lr_decay_d"] = str(lr_decay_d)
+    if segment_size is not None:
+        preset = dict(preset)
+        preset["segment_size"] = str(segment_size)
+    if precision is not None:
+        preset = dict(preset)
+        preset["precision"] = str(precision)
     out_dir = out_dir.resolve()
     # ensure training outputs (logs & checkpoints) land inside the dataset
     # folder so our wrapper can find them.  Lightning respects the
@@ -433,7 +495,7 @@ def build_train_command(out_dir: Path, ckpt_path: Path, voice_name: str, quality
         "--data.audio_dir",
         str(out_dir / "wavs"),
         "--model.sample_rate",
-        str(SAMPLE_RATE),
+        str(sample_rate if sample_rate is not None else SAMPLE_RATE),
         "--data.cache_dir",
         str(out_dir / "cache"),
         "--data.config_path",
@@ -446,6 +508,18 @@ def build_train_command(out_dir: Path, ckpt_path: Path, voice_name: str, quality
         str(shuffle_mode),
         "--data.espeak_voice",
         str(espeak_voice),
+        "--model.learning_rate",
+        str(preset["learning_rate"]),
+        "--model.learning_rate_d",
+        str(preset["learning_rate_d"]),
+        "--model.lr_decay",
+        str(preset["lr_decay"]),
+        "--model.lr_decay_d",
+        str(preset["lr_decay_d"]),
+        "--model.segment_size",
+        str(preset["segment_size"]),
+        "--trainer.precision",
+        str(preset["precision"]),
         "--ckpt_path",
         str(ckpt_path),
         "--trainer.max_epochs",
@@ -536,7 +610,26 @@ def sanitize_checkpoint(ckpt_path: Path) -> Path:
     return orig
 
 
-def run_train(out_dir: Path, ckpt_path: Path, voice_name: str, quality: str, gpu: bool, run: bool, epochs: int | None = None, batch_size: int | None = None, num_workers: int | None = None, espeak_voice: Optional[str] = None) -> None:
+def run_train(
+    out_dir: Path,
+    ckpt_path: Path,
+    voice_name: str,
+    quality: str,
+    gpu: bool,
+    run: bool,
+    epochs: int | None = None,
+    batch_size: int | None = None,
+    num_workers: int | None = None,
+    espeak_voice: Optional[str] = None,
+    shuffle_mode: str = "strong",
+    sample_rate: int | None = None,
+    learning_rate: float | None = None,
+    learning_rate_d: float | None = None,
+    lr_decay: float | None = None,
+    lr_decay_d: float | None = None,
+    segment_size: int | None = None,
+    precision: str | None = None,
+) -> None:
     # sanitize checkpoint to avoid CLI hyperparam parsing issues
     ckpt_path = sanitize_checkpoint(ckpt_path)
 
@@ -566,7 +659,26 @@ def run_train(out_dir: Path, ckpt_path: Path, voice_name: str, quality: str, gpu
     else:
         cfg_to_use = None
 
-    args = build_train_command(out_dir, ckpt_path, voice_name, quality, gpu, epochs, batch_size, num_workers, espeak_voice=espeak_voice, config_path=cfg_to_use)
+    args = build_train_command(
+        out_dir,
+        ckpt_path,
+        voice_name,
+        quality,
+        gpu,
+        epochs,
+        batch_size,
+        num_workers,
+        espeak_voice=espeak_voice,
+        shuffle_mode=shuffle_mode,
+        sample_rate=sample_rate,
+        learning_rate=learning_rate,
+        learning_rate_d=learning_rate_d,
+        lr_decay=lr_decay,
+        lr_decay_d=lr_decay_d,
+        segment_size=segment_size,
+        precision=precision,
+        config_path=cfg_to_use,
+    )
     full_cmd = [sys.executable, "-m", "piper.train"] + args
     print("Training command:")
     print(" ".join(full_cmd))
@@ -865,8 +977,8 @@ def main():
     parser = argparse.ArgumentParser(prog="train.py", description="Prepare and help run TTS training for samples.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    # prepare / init (alias)
-    p_prepare = sub.add_parser("init", help="Prepare samples into a training dataset (alias: prepare)")
+    # init
+    p_prepare = sub.add_parser("init", help="Prepare samples into a training dataset")
     p_prepare.add_argument("--samples-dir", type=Path, default=Path("samples"), help="Root samples directory")
     p_prepare.add_argument("--out-dir", type=Path, default=Path("data"), help="Output dataset folder")
     p_prepare.add_argument("--lang", choices=["en", "pl"], required=True, help="Language subfolder to use")
@@ -874,33 +986,43 @@ def main():
     p_prepare.add_argument("--voice-name", type=str, default=None, help="Optional output config basename; writes <name>.json instead of voice_config.json")
     p_prepare.add_argument("--no-convert", action="store_true", help="Do not run ffmpeg conversion; copy files instead")
 
-    p_prepare2 = sub.add_parser("prepare", help=argparse.SUPPRESS)
-    p_prepare2._action_groups = p_prepare._action_groups
-
-    # fetch-base
-    p_fetch = sub.add_parser("fetch-base", help="Download a base Piper checkpoint from Hugging Face")
-    p_fetch.add_argument("--dest-dir", type=Path, default=Path.home() / ".piper" / "checkpoints", help="Destination directory for checkpoint")
-    p_fetch.add_argument("--quality", choices=["low", "medium", "high"], default="medium")
-    p_fetch.add_argument("--model-id", type=str, default="", help="Optional model id or filename to fetch")
-    p_fetch.add_argument("--model-pattern", type=str, default="", help="Regex or substring to match checkpoint filenames (e.g. 'en' or 'pl' or 'male')")
-    p_fetch.add_argument("--yes", action="store_true", help="Non-interactive: accept first match")
-
     # train
     p_train = sub.add_parser("train", help="Print (or run) Piper training command (fine-tune)")
     p_train.add_argument("--out-dir", type=Path, default=Path("data"), help="Prepared dataset folder")
-    p_train.add_argument("--ckpt", type=Path, required=False, help="Base checkpoint path (if omitted, fetch-base will be attempted)")
+    p_train.add_argument("--ckpt", type=Path, required=False, help="Base checkpoint path (if omitted, a base checkpoint will be downloaded automatically)")
     p_train.add_argument("--voice-name", type=str, default="voice", help="Name for the voice to write into config")
     p_train.add_argument("--quality", choices=["low", "medium", "high"], default="medium")
     p_train.add_argument("--epochs", type=int, default=None,
-                         help="Override number of training epochs (useful for quick tests")
+                         help="Override number of training epochs (useful for quick tests)")
     p_train.add_argument("--gpu", action="store_true", help="Indicate GPU available")
     p_train.add_argument("--batch-size", type=int, default=None,
                          help="Override batch size (otherwise derived from quality preset)")
     p_train.add_argument("--num-workers", type=int, default=None,
-                         help="Override DataLoader num_workers (default: auto / set by wrapper)")
+                         help="Override DataLoader num_workers (otherwise 0)")
     p_train.add_argument("--shuffle-mode", type=str, default="strong",
                          choices=["strong", "normal", "weak", "off"],
                          help="Shuffle rigor for training data ordering.")
+    p_train.add_argument("--sample-rate", type=int, default=None,
+                         help="Override the model sample rate (default 22050)")
+    p_train.add_argument("--learning-rate", type=float, default=None,
+                         help="Override the phoneme model learning rate")
+    p_train.add_argument("--learning-rate-d", type=float, default=None,
+                         help="Override the discriminator learning rate")
+    p_train.add_argument("--lr-decay", type=float, default=None,
+                         help="Override the generator learning rate decay")
+    p_train.add_argument("--lr-decay-d", type=float, default=None,
+                         help="Override the discriminator learning rate decay")
+    p_train.add_argument("--segment-size", type=int, default=None,
+                         help="Override the model segment size")
+    p_train.add_argument("--precision", type=str, default=None,
+                         choices=["16", "32"],
+                         help="Trainer precision for mixed precision training")
+    p_train.add_argument("--model-id", type=str, default=None,
+                         help="Optional model id or filename to select when auto-fetching a base checkpoint")
+    p_train.add_argument("--model-pattern", type=str, default=None,
+                         help="Optional substring or regex to match checkpoint filenames when auto-fetching a base checkpoint")
+    p_train.add_argument("--yes", action="store_true",
+                         help="Non-interactive: accept the first matching checkpoint when auto-fetching")
     p_train.add_argument("--espeak-voice", type=str, default=None,
                          help="Override espeak voice (e.g. 'pl' or 'en-us').  The wrapper will set this automatically based on language.")
     p_train.add_argument("--run", action="store_true", help="Execute the training command")
@@ -911,22 +1033,9 @@ def main():
     p_export.add_argument("--output", type=Path, required=True, help="Output .onnx file path")
     p_export.add_argument("--espeak-voice", type=str, default=None, help="Override espeak voice for export fallback config")
 
-    # synth-test
-    p_synth = sub.add_parser("synth-test", help="Synthesize a test WAV from an exported model")
-    p_synth.add_argument("--model", type=Path, required=True, help="Path to .onnx file or directory containing .onnx and .json")
-    p_synth.add_argument("--text", type=str, required=True, help="Text to synthesize")
-    p_synth.add_argument("--out-file", type=Path, default=Path("test_synth.wav"), help="Output WAV file")
-
-    # checkpoint synth
-    p_synth_ckpt = sub.add_parser("synth-checkpoint", help="Synthesize a test WAV directly from a checkpoint using VITS interpreter")
-    p_synth_ckpt.add_argument("--checkpoint", type=Path, required=True, help="Path to .ckpt checkpoint")
-    p_synth_ckpt.add_argument("--text", type=str, required=True, help="Text to synthesize")
-    p_synth_ckpt.add_argument("--out-file", type=Path, default=Path("test_synth_from_ckpt.wav"), help="Output WAV file")
-    p_synth_ckpt.add_argument("--espeak-voice", type=str, default="en-us", help="espeak voice for phonemization")
-
     args = parser.parse_args()
 
-    if args.cmd in ("init", "prepare"):
+    if args.cmd == "init":
         try:
             prepare_dataset(
                 args.samples_dir,
@@ -939,17 +1048,18 @@ def main():
         except subprocess.CalledProcessError as e:
             raise SystemExit(f"ffmpeg failed. Make sure ffmpeg is installed: {e}")
 
-    elif args.cmd == "fetch-base":
-        ckpt = fetch_base_checkpoint(args.dest_dir, quality=args.quality, model_id=(args.model_id or None))
-        print("Base checkpoint available at:", ckpt)
-
     elif args.cmd == "train":
         out_dir = args.out_dir
         ckpt_path = args.ckpt
         if not ckpt_path:
-            # attempt to fetch into default location
             default_dest = Path.home() / ".piper" / "checkpoints" / args.quality
-            ckpt_path = fetch_base_checkpoint(default_dest, quality=args.quality)
+            ckpt_path = fetch_base_checkpoint(
+                default_dest,
+                quality=args.quality,
+                model_id=args.model_id,
+                model_pattern=args.model_pattern,
+                yes=args.yes,
+            )
         run_train(
             out_dir,
             ckpt_path,
@@ -962,16 +1072,17 @@ def main():
             num_workers=args.num_workers,
             espeak_voice=args.espeak_voice,
             shuffle_mode=args.shuffle_mode,
+            sample_rate=args.sample_rate,
+            learning_rate=args.learning_rate,
+            learning_rate_d=args.learning_rate_d,
+            lr_decay=args.lr_decay,
+            lr_decay_d=args.lr_decay_d,
+            segment_size=args.segment_size,
+            precision=args.precision,
         )
-
-    elif args.cmd == "synth-checkpoint":
-        synth_test_checkpoint(args.checkpoint, args.text, args.out_file, espeak_voice=args.espeak_voice)
 
     elif args.cmd == "export":
         export_onnx(args.checkpoint, args.output, espeak_voice=args.espeak_voice)
-
-    elif args.cmd == "synth-test":
-        synth_test(args.model, args.text, args.out_file)
 
 
 if __name__ == "__main__":
