@@ -18,6 +18,7 @@ Files in this repository:
 - `train_and_export.sh` — convenience wrapper that can prepare a dataset, download a base checkpoint, train, export to ONNX, and run synthesis tests in a single sequence.
 - `synth.py` — runtime synthesis script for built-in voices or a trained ONNX model.
 - `synth.sh` — wrapper to activate `.venv` and run `synth.py`.
+- `checkpoint.py` — list and download Hugging Face Piper checkpoints.
 - `record_samples.py` — interactive web tool for collecting microphone samples plus transcriptions.
 - `sample_en.txt` — English test sentence.
 - `sample_pl.txt` — Polish test sentence.
