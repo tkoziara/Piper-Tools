@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import tty
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -77,6 +78,88 @@ def parse_padding(value: str) -> float:
     if padding < 0.1:
         raise argparse.ArgumentTypeError("padding must be at least 0.1 seconds")
     return padding
+
+
+def input_with_prefill(prompt: str, text: str) -> str:
+    try:
+        import readline
+    except ImportError:
+        return input(prompt)
+
+    def hook() -> None:
+        readline.insert_text(text)
+
+    readline.set_startup_hook(hook)
+    try:
+        return input(prompt)
+    finally:
+        readline.set_startup_hook(None)
+
+
+def ensure_candidate_metadata(candidate: Dict[str, Any]) -> None:
+    if "original_start" not in candidate:
+        candidate["original_start"] = candidate["start"]
+    if "original_end" not in candidate:
+        candidate["original_end"] = candidate["end"]
+    if "merge_history" not in candidate:
+        candidate["merge_history"] = []
+
+
+def init_denoiser() -> tuple:
+    try:
+        from df.enhance import init_df
+    except ImportError as exc:
+        raise SystemExit(
+            "Denoising requested, but DeepFilterNet is not installed. "
+            "Install it with `pip install deepfilternet`."
+        ) from exc
+    model, df_state, _ = init_df()
+    return model, df_state
+
+
+def denoise_audio(src: Path, dst: Path, denoiser: Optional[tuple]) -> None:
+    if denoiser is None:
+        shutil.copy2(src, dst)
+        return
+    from df.enhance import enhance, load_audio, save_audio
+
+    model, df_state = denoiser
+    audio, _ = load_audio(str(src), sr=df_state.sr())
+    enhanced = enhance(model, df_state, audio)
+    save_audio(str(dst), enhanced, df_state.sr())
+
+
+def rebuild_candidate_wav(
+    candidate: Dict[str, Any],
+    sample_rate: int,
+    padding: float,
+    max_end: Optional[float] = None,
+) -> None:
+    source = Path(candidate["source"])
+    wav_path = Path(candidate["wav_path"])
+    normalize_audio_segment(
+        source,
+        wav_path,
+        candidate["start"],
+        candidate["end"],
+        sample_rate,
+        padding=padding,
+        max_end=max_end,
+    )
+
+
+def save_candidate_text(candidate: Dict[str, Any]) -> None:
+    Path(candidate["txt_path"]).write_text(candidate["text"], encoding="utf-8")
+
+
+def merge_forward_text(first: str, second: str) -> str:
+    first = first.rstrip()
+    if first and first[-1] in ".!?":
+        first = first[:-1].rstrip()
+    second = second.lstrip()
+    if second:
+        second = second[0].lower() + second[1:]
+    return f"{first} {second}"
 
 
 def get_audio_duration(path: Path) -> float:
@@ -385,8 +468,23 @@ def read_single_key() -> str:
     return key
 
 
-def prompt_decision() -> str:
-    print("Commands: [y] approve, [n] reject, [p] play, [b] back, [f] forward, [q] quit")
+def prompt_decision(candidate: Optional[Dict[str, Any]] = None) -> str:
+    commands = [
+        "[y] approve",
+        "[n] reject",
+        "[p] play",
+        "[b] back",
+        "[f] forward",
+        "[q] quit",
+        "[e] edit text",
+        "[-] step back",
+        "[=] trim end",
+        "[r] restore trims",
+        "[+] merge forward",
+    ]
+    if candidate and candidate.get("merge_history"):
+        commands.append("[u] unmerge")
+    print("Commands: " + ", ".join(commands))
     print("Choice: ", end="", flush=True)
     key = read_single_key().strip().lower()
     print(key)
@@ -395,15 +493,21 @@ def prompt_decision() -> str:
     return key[0]
 
 
-def review_candidates(candidates: List[Dict[str, Any]], scratch_dir: Path) -> None:
-    session_path = scratch_dir / SESSION_FILENAME
+def review_candidates(
+    candidates: List[Dict[str, Any]],
+    sample_rate: int,
+    padding: float,
+) -> None:
+    for candidate in candidates:
+        ensure_candidate_metadata(candidate)
+    session_path = Path(candidates[0]["wav_path"]).parent.parent / SESSION_FILENAME if candidates else Path(SESSION_FILENAME)
     idx = 0
-    total = len(candidates)
-    while idx < total:
+    while idx < len(candidates):
         candidate = candidates[idx]
+        total = len(candidates)
         print(f"\n[{idx + 1}/{total}] {candidate['text']}")
         print(f"Current decision: {candidate['decision']}")
-        action = prompt_decision()
+        action = prompt_decision(candidate)
         if action == "y":
             candidate["decision"] = "approved"
             idx += 1
@@ -419,6 +523,92 @@ def review_candidates(candidates: List[Dict[str, Any]], scratch_dir: Path) -> No
                 print("Already at first sample.")
         elif action == "f":
             idx += 1
+        elif action == "e":
+            print(f"Current text: {candidate['text']}")
+            edited = input_with_prefill("New text (leave blank to keep current): ", candidate["text"]).strip()
+            if edited and edited != candidate["text"]:
+                candidate["text"] = edited
+                save_candidate_text(candidate)
+        elif action == "-":
+            candidate["start"] = max(0.0, candidate["start"] - padding)
+            next_start = None
+            if idx + 1 < len(candidates):
+                next_candidate = candidates[idx + 1]
+                if next_candidate["source"] == candidate["source"]:
+                    next_start = next_candidate["start"] - padding
+            rebuild_candidate_wav(candidate, sample_rate, padding, max_end=next_start)
+        elif action == "=":
+            candidate["end"] = max(candidate["start"] + 0.01, candidate["end"] - padding)
+            next_start = None
+            if idx + 1 < len(candidates):
+                next_candidate = candidates[idx + 1]
+                if next_candidate["source"] == candidate["source"]:
+                    next_start = next_candidate["start"] - padding
+            rebuild_candidate_wav(candidate, sample_rate, padding, max_end=next_start)
+        elif action == "r":
+            candidate["start"] = candidate.get("original_start", candidate["start"])
+            candidate["end"] = candidate.get("original_end", candidate["end"])
+            next_start = None
+            if idx + 1 < len(candidates):
+                next_candidate = candidates[idx + 1]
+                if next_candidate["source"] == candidate["source"]:
+                    next_start = next_candidate["start"] - padding
+            rebuild_candidate_wav(candidate, sample_rate, padding, max_end=next_start)
+        elif action == "+":
+            if idx + 1 >= len(candidates):
+                print("No following sample to merge with.")
+            else:
+                next_candidate = candidates[idx + 1]
+                if next_candidate["source"] != candidate["source"]:
+                    print("Cannot merge samples from different source files.")
+                else:
+                    history_entry = {
+                        "text_before": candidate["text"],
+                        "end_before": candidate["end"],
+                        "original_start_before": candidate.get("original_start", candidate["start"]),
+                        "original_end_before": candidate.get("original_end", candidate["end"]),
+                        "next_candidate": deepcopy(next_candidate),
+                    }
+                    candidate["merge_history"].append(history_entry)
+                    candidate["text"] = merge_forward_text(candidate["text"], next_candidate["text"])
+                    candidate["end"] = next_candidate["end"]
+                    candidate["original_end"] = next_candidate.get("original_end", next_candidate["end"])
+                    candidate["decision"] = "pending"
+                    for path_key in ("wav_path", "txt_path"):
+                        try:
+                            Path(next_candidate[path_key]).unlink()
+                        except OSError:
+                            pass
+                    del candidates[idx + 1]
+                    next_start = None
+                    if idx + 1 < len(candidates):
+                        following_candidate = candidates[idx + 1]
+                        if following_candidate["source"] == candidate["source"]:
+                            next_start = following_candidate["start"] - padding
+                    save_candidate_text(candidate)
+                    rebuild_candidate_wav(candidate, sample_rate, padding, max_end=next_start)
+        elif action == "u":
+            if not candidate.get("merge_history"):
+                print("Nothing to unmerge.")
+            else:
+                history_entry = candidate["merge_history"].pop()
+                next_candidate = deepcopy(history_entry["next_candidate"])
+                candidate["text"] = history_entry["text_before"]
+                candidate["end"] = history_entry["end_before"]
+                candidate["original_start"] = history_entry["original_start_before"]
+                candidate["original_end"] = history_entry["original_end_before"]
+                insert_idx = idx + 1
+                candidates.insert(insert_idx, next_candidate)
+                ensure_candidate_metadata(next_candidate)
+                save_candidate_text(candidate)
+                save_candidate_text(next_candidate)
+                next_start = None
+                if insert_idx + 1 < len(candidates):
+                    following_candidate = candidates[insert_idx + 1]
+                    if following_candidate["source"] == candidate["source"]:
+                        next_start = following_candidate["start"] - padding
+                rebuild_candidate_wav(candidate, sample_rate, padding, max_end=next_start)
+                rebuild_candidate_wav(next_candidate, sample_rate, padding)
         elif action == "q":
             save_session(session_path, {"candidates": candidates})
             print(f"Progress saved to {session_path}. Run with --resume to continue.")
@@ -460,26 +650,37 @@ def build_session_from_audio(
     sample_rate: int,
     scratch_dir: Path,
     padding: float,
+    denoise: bool,
 ) -> Tuple[str, List[Dict[str, Any]]]:
+    denoiser_obj = init_denoiser() if denoise else None
     model = load_whisper_model(model_name)
     recordings: List[Dict[str, Any]] = []
     detected_language = language
+    denoised_dir = scratch_dir / "denoised"
+    if denoiser_obj is not None:
+        denoised_dir.mkdir(parents=True, exist_ok=True)
     for audio_path in audio_paths:
-        print(f"Transcribing: {audio_path.name}")
+        source_path = audio_path
+        if denoiser_obj is not None:
+            denoised_path = denoised_dir / audio_path.name
+            if not denoised_path.exists():
+                denoise_audio(audio_path, denoised_path, denoiser_obj)
+            source_path = denoised_path
+        print(f"Transcribing: {source_path.name}")
         kwargs: Dict[str, Any] = {"fp16": False}
         if detected_language:
             kwargs["language"] = detected_language
-        result = model.transcribe(str(audio_path), **kwargs)
+        result = model.transcribe(str(source_path), **kwargs)
         if not detected_language:
             detected_language = result.get("language", detected_language)
             if detected_language:
                 print(f"Detected language: {detected_language}")
         segments = result.get("segments", [])
         sentences = build_sentence_candidates(segments)
-        print(f"Detected {len(sentences)} sentence candidates in {audio_path.name}")
+        print(f"Detected {len(sentences)} sentence candidates in {source_path.name}")
         recordings.extend([
             {
-                "audio_path": str(audio_path),
+                "audio_path": str(source_path),
                 "sentence": sentence,
             }
             for sentence in sentences
@@ -497,6 +698,9 @@ def build_session_from_audio(
             "decision": "pending",
             "start": sentence["start"],
             "end": sentence["end"],
+            "original_start": sentence["start"],
+            "original_end": sentence["end"],
+            "merge_history": [],
             "source": str(audio_path),
         }
         all_candidates.append(candidate)
@@ -520,7 +724,7 @@ def build_session_from_audio(
             candidate["end"],
             sample_rate,
             padding=padding,
-            max_end=next_start
+            max_end=next_start,
         )
         txt_path.write_text(candidate["text"], encoding="utf-8")
         candidate["wav_path"] = str(wav_path)
@@ -543,6 +747,7 @@ def main() -> None:
     parser.add_argument("--model", type=str, default=None, help="Whisper model to use: tiny, base, small, medium, large.")
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE, help="Output WAV sample rate.")
     parser.add_argument("--padding", type=parse_padding, default=DEFAULT_PADDING, help="Seconds of padding to add before/after each extracted sample (minimum 0.1).")
+    parser.add_argument("--denoise", action="store_true", help="Denoise extracted sentence samples using DeepFilterNet.")
     parser.add_argument("--approve-all", action="store_true", help="Auto-approve all detected samples and skip interactive review.")
     parser.add_argument("--resume", action="store_true", help="Resume a previously saved approval session in the scratch directory.")
     parser.add_argument("--recursive", action="store_true", help="Scan input directories recursively.")
@@ -572,6 +777,7 @@ def main() -> None:
             args.sample_rate,
             scratch_dir,
             args.padding,
+            args.denoise,
         )
         session = {
             "language": language,
@@ -587,7 +793,7 @@ def main() -> None:
         save_session(session_path, session)
     else:
         try:
-            review_candidates(candidates, scratch_dir)
+            review_candidates(candidates, args.sample_rate, args.padding)
         except KeyboardInterrupt:
             save_session(session_path, {"language": session.get("language"), "candidates": candidates})
             print(f"Progress saved to {session_path}. You can resume with --resume.")
