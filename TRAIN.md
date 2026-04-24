@@ -20,7 +20,7 @@ python3 train.py init --samples-dir samples_pl --out-dir training_pl --lang pl
 ```
 
    If you don't have existing audio/text pairs you can build them interactively
-   using the web-based helper `generate_samples.py` which uses Whisper to
+   using the web-based helper `record_samples.py` which uses Whisper to
    transcribe your voice.  See the project README for usage.
 
 2) Fetch a base Piper checkpoint (automatic, uses Hugging Face `rhasspy/piper-checkpoints` by default):
