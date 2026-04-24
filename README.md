@@ -4,7 +4,7 @@ This repository contains scripts and notebooks for preparing Piper TTS datasets,
 training models, exporting them to ONNX, and running synthesis tests.
 
 A common workflow is:
-1. prepare or collect data locally with `generate_samples.py`and set them up for training with `train.py init`
+1. prepare or collect data locally with `record_samples.py` and set them up for training with `train.py init`
 2. train a model in Google Colab using `Training_EN.ipynb` / `Training_PL.ipynb`
 3. export the trained checkpoint with `train.py export` or `train_and_export.sh`
 4. synthesize using `synth.py` or `synth.sh`
@@ -18,7 +18,7 @@ Files in this repository:
 - `train_and_export.sh` — convenience wrapper that can prepare a dataset, download a base checkpoint, train, export to ONNX, and run synthesis tests in a single sequence.
 - `synth.py` — runtime synthesis script for built-in voices or a trained ONNX model.
 - `synth.sh` — wrapper to activate `.venv` and run `synth.py`.
-- `generate_samples.py` — interactive web tool for collecting microphone samples plus transcriptions.
+- `record_samples.py` — interactive web tool for collecting microphone samples plus transcriptions.
 - `sample_en.txt` — English test sentence.
 - `sample_pl.txt` — Polish test sentence.
 - `Training_EN.ipynb` — Google Colab notebook for English training.
@@ -94,11 +94,11 @@ and `out_pl.wav`.
 
 ## Sample collection
 
-Use `generate_samples.py` to collect `.wav`/`.txt` pairs in a browser:
+Use `record_samples.py` to collect `.wav`/`.txt` pairs in a browser:
 
 ```bash
-python generate_samples.py --lang en samples/en
-python generate_samples.py --lang pl samples/pl
+python record_samples.py --lang en samples/en
+python record_samples.py --lang pl samples/pl
 ```
 
 Then open `http://localhost:8765` and record a short clip. You can edit the

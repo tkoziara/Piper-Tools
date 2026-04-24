@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Simple web tool to record/transcribe/collect voice samples.
 
-Usage: python generate_samples.py --lang en|pl /path/to/dir
+Usage: python record_samples.py --lang en|pl /path/to/dir
 
 Starts a server on localhost:8765.  Open the page in a browser, record your
 voice, edit the recognized sentence and save.  WAV+TXT pair will be created in
