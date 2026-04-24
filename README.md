@@ -20,6 +20,7 @@ Files in this repository:
 - `synth.sh` — wrapper to activate `.venv` and run `synth.py`.
 - `checkpoint.py` — list and download Hugging Face Piper checkpoints.
 - `record_samples.py` — interactive web tool for collecting microphone samples plus transcriptions.
+- `generate_samples.py` — generate samples from recorded audio clips.
 - `sample_en.txt` — English test sentence.
 - `sample_pl.txt` — Polish test sentence.
 - `Training_EN.ipynb` — Google Colab notebook for English training.
