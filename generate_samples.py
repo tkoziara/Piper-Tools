@@ -497,13 +497,14 @@ def play_audio(path: Path, candidate: Optional[Dict[str, Any]] = None, padding: 
         secs = int(seconds % 60)
         return f"{minutes:02}:{secs:02}"
 
-    def print_status(current: float, total: float) -> None:
+    def print_status(current: float, total: float, show_trim_end: bool = False) -> None:
         bar_width = 30
         progress = min(max(current / max(total, 1e-6), 0.0), 1.0)
         filled = int(progress * bar_width)
         bar = "#" * filled + "-" * (bar_width - filled)
+        trim_end_indicator = "| [=] trim end " if show_trim_end else "               "
         print(
-            f"\r[{bar}] {format_time(current)} / {format_time(total)} ",
+            f"\r[{bar}] {format_time(current)} / {format_time(total)} {trim_end_indicator}",
             end="",
             flush=True,
         )
@@ -553,7 +554,7 @@ def play_audio(path: Path, candidate: Optional[Dict[str, Any]] = None, padding: 
     try:
         process = start_playback(position)
         start_time = time.monotonic()
-        print("Press [q] quit, [p] pause/resume, [←] rewind, [→] forward, [-] step back, [u] untrim")
+        print("Press [q] quit, [p or space] pause/resume, [←] rewind, [→] forward, [-] step back, [u] untrim")
         while True:
             if process is not None and process.poll() is not None:
                 position = duration
@@ -566,7 +567,7 @@ def play_audio(path: Path, candidate: Optional[Dict[str, Any]] = None, padding: 
             key = read_single_key()
             if key == "q":
                 break
-            elif key == "p":
+            elif key == "p" or key == " ":
                 if process is not None and process.poll() is None:
                     process.terminate()
                     process.wait()
@@ -574,8 +575,7 @@ def play_audio(path: Path, candidate: Optional[Dict[str, Any]] = None, padding: 
                     position = min(position + elapsed, duration)
                     paused = True
                     process = None
-                    print_status(position, duration)
-                    print("  Paused | [=] trim end | [u] untrim", end="", flush=True)
+                    print_status(position, duration, show_trim_end=True)
                 else:
                     if position >= duration:
                         position = 0.0
@@ -583,7 +583,6 @@ def play_audio(path: Path, candidate: Optional[Dict[str, Any]] = None, padding: 
                     start_time = time.monotonic()
                     paused = False
                     finished = False
-                    print("Press [q] quit, [p] pause/resume, [←] rewind, [→] forward, [-] step back, [u] untrim")
             elif key == "=":
                 if paused:
                     trim_target = min(duration, position + padding)
@@ -677,10 +676,15 @@ def play_audio(path: Path, candidate: Optional[Dict[str, Any]] = None, padding: 
                         position = min(position + elapsed, duration)
                         position = min(duration, position + 2.0)
                     if position >= duration:
-                        break
-                    process = start_playback(position)
-                    start_time = time.monotonic()
-                    paused = False
+                        position = duration
+                        process = None
+                        paused = False
+                        finished = True
+                        print_status(position, duration)
+                    else:
+                        process = start_playback(position)
+                        start_time = time.monotonic()
+                        paused = False
             if process is not None and process.poll() is not None:
                 break
     finally:
@@ -748,11 +752,12 @@ def review_candidates(
     session: Dict[str, Any],
     scratch_dir: Path,
     samples_dir: Path,
+    start_idx: int = 0,
 ) -> None:
     for candidate in candidates:
         ensure_candidate_metadata(candidate)
     session_path = Path(candidates[0]["wav_path"]).parent.parent / SESSION_FILENAME if candidates else Path(SESSION_FILENAME)
-    idx = 0
+    idx = min(max(0, start_idx), len(candidates) - 1) if candidates else 0
     while idx < len(candidates):
         candidate = candidates[idx]
         total = len(candidates)
@@ -761,10 +766,8 @@ def review_candidates(
         action = prompt_decision(candidate)
         if action == "a":
             candidate["decision"] = "approved"
-            idx += 1
         elif action == "r":
             candidate["decision"] = "rejected"
-            idx += 1
         elif action == "p":
             play_audio(Path(candidate["wav_path"]), candidate=candidate, padding=padding, sample_rate=sample_rate)
         elif action == "b":
@@ -867,14 +870,41 @@ def review_candidates(
                 rebuild_candidate_wav(next_candidate, sample_rate, padding)
         elif action == "\x1b":
             if confirm_yes_no("Quit and save progress?"):
-                save_session(session_path, {"language": session.get("language"), "candidates": candidates, "last_exported": session.get("last_exported", []), "samples_dir": session.get("samples_dir")})
+                save_session(
+                    session_path,
+                    {
+                        "language": session.get("language"),
+                        "candidates": candidates,
+                        "last_exported": session.get("last_exported", []),
+                        "samples_dir": session.get("samples_dir"),
+                        "current_index": idx,
+                    },
+                )
                 print(f"Progress saved to {session_path}. Run with --resume to continue.")
                 sys.exit(0)
             print("Continue review.")
         else:
             print("Unknown command.")
-        save_session(session_path, {"candidates": candidates})
-    save_session(session_path, {"candidates": candidates})
+        save_session(
+            session_path,
+            {
+                "language": session.get("language"),
+                "candidates": candidates,
+                "last_exported": session.get("last_exported", []),
+                "samples_dir": session.get("samples_dir"),
+                "current_index": idx,
+            },
+        )
+    save_session(
+        session_path,
+        {
+            "language": session.get("language"),
+            "candidates": candidates,
+            "last_exported": session.get("last_exported", []),
+            "samples_dir": session.get("samples_dir"),
+            "current_index": idx,
+        },
+    )
 
 
 def append_approved_samples(
@@ -1076,6 +1106,7 @@ def main() -> None:
         session = load_session(session_path)
         candidates = session.get("candidates", [])
         language = session.get("language") or args.lang or "en"
+        resume_idx = int(session.get("current_index", 0))
     else:
         audio_paths = find_audio_paths(args.inputs, recursive=args.recursive)
         language, candidates = build_session_from_audio(
@@ -1092,8 +1123,10 @@ def main() -> None:
             "model": args.model,
             "sample_rate": args.sample_rate,
             "candidates": candidates,
+            "current_index": 0,
         }
         save_session(session_path, session)
+        resume_idx = 0
 
     samples_dir = args.samples_dir
     if samples_dir is None:
@@ -1106,7 +1139,7 @@ def main() -> None:
         save_session(session_path, session)
     else:
         try:
-            review_candidates(candidates, args.sample_rate, args.padding, session, scratch_dir, samples_dir)
+            review_candidates(candidates, args.sample_rate, args.padding, session, scratch_dir, samples_dir, start_idx=resume_idx)
         except KeyboardInterrupt:
             save_session(session_path, {"language": session.get("language"), "candidates": candidates, "last_exported": session.get("last_exported", []), "samples_dir": session.get("samples_dir")})
             print(f"Progress saved to {session_path}. You can resume with --resume.")
