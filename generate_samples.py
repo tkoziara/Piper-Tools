@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import re
@@ -12,7 +14,10 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import tty
+import warnings
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -80,6 +85,13 @@ def parse_padding(value: str) -> float:
     return padding
 
 
+@contextlib.contextmanager
+def suppress_output():
+    with open(os.devnull, "w") as devnull:
+        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+            yield
+
+
 def input_with_prefill(prompt: str, text: str) -> str:
     try:
         import readline
@@ -96,6 +108,33 @@ def input_with_prefill(prompt: str, text: str) -> str:
         readline.set_startup_hook(None)
 
 
+class Spinner:
+    def __init__(self, message: str, delay: float = 0.1):
+        self.message = message
+        self.delay = delay
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        symbols = "|/-\\"
+        idx = 0
+        while not self.stop_event.is_set():
+            sys.__stdout__.write(f"\r{self.message} {symbols[idx % len(symbols)]}")
+            sys.__stdout__.flush()
+            idx += 1
+            time.sleep(self.delay)
+        sys.__stdout__.write("\r" + " " * (len(self.message) + 4) + "\r")
+        sys.__stdout__.flush()
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop_event.set()
+        self.thread.join()
+
+
 def ensure_candidate_metadata(candidate: Dict[str, Any]) -> None:
     if "original_start" not in candidate:
         candidate["original_start"] = candidate["start"]
@@ -107,13 +146,17 @@ def ensure_candidate_metadata(candidate: Dict[str, Any]) -> None:
 
 def init_denoiser() -> tuple:
     try:
-        from df.enhance import init_df
+        with suppress_output():
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=UserWarning)
+                from df.enhance import init_df
     except ImportError as exc:
         raise SystemExit(
             "Denoising requested, but DeepFilterNet is not installed. "
             "Install it with `pip install deepfilternet`."
         ) from exc
-    model, df_state, _ = init_df()
+    with suppress_output():
+        model, df_state, _ = init_df()
     return model, df_state
 
 
@@ -121,12 +164,15 @@ def denoise_audio(src: Path, dst: Path, denoiser: Optional[tuple]) -> None:
     if denoiser is None:
         shutil.copy2(src, dst)
         return
-    from df.enhance import enhance, load_audio, save_audio
+    with suppress_output():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=UserWarning)
+            from df.enhance import enhance, load_audio, save_audio
 
-    model, df_state = denoiser
-    audio, _ = load_audio(str(src), sr=df_state.sr())
-    enhanced = enhance(model, df_state, audio)
-    save_audio(str(dst), enhanced, df_state.sr())
+        model, df_state = denoiser
+        audio, _ = load_audio(str(src), sr=df_state.sr())
+        enhanced = enhance(model, df_state, audio)
+        save_audio(str(dst), enhanced, df_state.sr())
 
 
 def rebuild_candidate_wav(
@@ -242,6 +288,9 @@ def normalize_audio_segment(
     padded_end = max(padded_start, end + padding)
     if max_end is not None:
         padded_end = min(padded_end, max_end)
+
+    if padded_end <= padded_start + 1e-3:
+        padded_end = padded_start + 0.01
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
         temp_path = Path(tmp_file.name)
@@ -434,7 +483,7 @@ def find_last_sample_index(samples_dir: Path) -> int:
     return highest
 
 
-def play_audio(path: Path) -> None:
+def play_audio(path: Path, candidate: Optional[Dict[str, Any]] = None, padding: float = 0.0, sample_rate: int = DEFAULT_SAMPLE_RATE) -> None:
     player = None
     for prog in ("aplay", "paplay", "ffplay"):
         if shutil.which(prog):
@@ -442,10 +491,205 @@ def play_audio(path: Path) -> None:
             break
     if not player:
         raise SystemExit("No audio player found. Install aplay, paplay, or ffplay.")
-    if player == "ffplay":
-        subprocess.run([player, "-autoexit", "-nodisp", str(path)])
-    else:
-        subprocess.run([player, str(path)])
+
+    def format_time(seconds: float) -> str:
+        minutes = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{minutes:02}:{secs:02}"
+
+    def print_status(current: float, total: float) -> None:
+        bar_width = 30
+        progress = min(max(current / max(total, 1e-6), 0.0), 1.0)
+        filled = int(progress * bar_width)
+        bar = "#" * filled + "-" * (bar_width - filled)
+        print(
+            f"\r[{bar}] {format_time(current)} / {format_time(total)} ",
+            end="",
+            flush=True,
+        )
+
+    if player != "ffplay":
+        subprocess.run([player, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+
+    duration = get_audio_duration(path)
+    position = 0.0
+    stop_event = threading.Event()
+    process: Optional[subprocess.Popen] = None
+    paused = False
+    finished = False
+    start_time = 0.0
+
+    def start_playback(start_position: float) -> subprocess.Popen:
+        return subprocess.Popen(
+            [
+                player,
+                "-autoexit",
+                "-nodisp",
+                "-loglevel",
+                "quiet",
+                "-ss",
+                str(start_position),
+                str(path),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def playback_monitor() -> None:
+        nonlocal position, start_time, paused
+        while not stop_event.is_set():
+            if paused or process is None or process.poll() is not None:
+                time.sleep(0.1)
+                continue
+            elapsed = time.monotonic() - start_time
+            current = min(position + elapsed, duration)
+            print_status(current, duration)
+            time.sleep(0.1)
+
+    monitor_thread = threading.Thread(target=playback_monitor, daemon=True)
+    monitor_thread.start()
+
+    try:
+        process = start_playback(position)
+        start_time = time.monotonic()
+        print("Press [q] quit, [p] pause/resume, [←] rewind, [→] forward, [-] step back, [u] untrim")
+        while True:
+            if process is not None and process.poll() is not None:
+                position = duration
+                process = None
+                paused = False
+                if not finished:
+                    finished = True
+                    print_status(position, duration)
+                    print("\nPlayback finished. Press [p] to restart, [q] quit, [←] rewind, [→] forward, [-] step back, [u] untrim")
+            key = read_single_key()
+            if key == "q":
+                break
+            elif key == "p":
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    process.wait()
+                    elapsed = time.monotonic() - start_time
+                    position = min(position + elapsed, duration)
+                    paused = True
+                    process = None
+                    print_status(position, duration)
+                    print("  Paused | [=] trim end | [u] untrim", end="", flush=True)
+                else:
+                    if position >= duration:
+                        position = 0.0
+                    process = start_playback(position)
+                    start_time = time.monotonic()
+                    paused = False
+                    finished = False
+                    print("Press [q] quit, [p] pause/resume, [←] rewind, [→] forward, [-] step back, [u] untrim")
+            elif key == "=":
+                if paused:
+                    trim_target = min(duration, position + padding)
+                    temp_path = Path(tempfile.mktemp(suffix=".wav"))
+                    subprocess.run(
+                        [
+                            "ffmpeg",
+                            "-y",
+                            "-hide_banner",
+                            "-loglevel",
+                            "error",
+                            "-i",
+                            str(path),
+                            "-ss",
+                            "0",
+                            "-to",
+                            str(trim_target),
+                            str(temp_path),
+                        ],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    shutil.move(str(temp_path), str(path))
+                    if candidate is not None:
+                        candidate["end"] = min(candidate.get("end", duration), position + padding)
+                    duration = get_audio_duration(path)
+                    print_status(position, duration)
+                    print("  Trimmed", end="", flush=True)
+                else:
+                    print("\nPause playback before trimming.")
+            elif key == "-":
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if candidate is not None:
+                    candidate["start"] = max(0.0, candidate["start"] - padding)
+                    rebuild_candidate_wav(candidate, sample_rate, padding)
+                position = 0.0
+                process = start_playback(position)
+                start_time = time.monotonic()
+                paused = False
+                finished = False
+                print("Press [q] quit, [p] pause/resume, [←] rewind, [→] forward, [-] step back, [u] untrim")
+            elif key == "u":
+                if candidate is None:
+                    print("\nNo candidate to untrim.")
+                else:
+                    original_start = candidate.get("original_start", candidate["start"])
+                    original_end = candidate.get("original_end", candidate["end"])
+                    if candidate["start"] == original_start and candidate["end"] == original_end:
+                        print("\nAlready untrimmed.")
+                    else:
+                        if process is not None and process.poll() is None:
+                            process.kill()
+                            process.wait()
+                        candidate["start"] = original_start
+                        candidate["end"] = original_end
+                        rebuild_candidate_wav(candidate, sample_rate, padding)
+                        duration = get_audio_duration(path)
+                        position = 0.0
+                        process = start_playback(position)
+                        start_time = time.monotonic()
+                        paused = False
+                        finished = False
+                        print("\nUntrimmed and restarted playback.")
+            elif key == "\x1b":
+                second = read_single_key()
+                third = read_single_key()
+                if second == "[" and third == "D":
+                    if process is not None and process.poll() is None:
+                        process.kill()
+                        process.wait()
+                    if paused:
+                        position = max(0.0, position - 2.0)
+                    else:
+                        elapsed = time.monotonic() - start_time
+                        position = min(position + elapsed, duration)
+                        position = max(0.0, position - 2.0)
+                    process = start_playback(position)
+                    start_time = time.monotonic()
+                    paused = False
+                elif second == "[" and third == "C":
+                    if process is not None and process.poll() is None:
+                        process.kill()
+                        process.wait()
+                    if paused:
+                        position = min(duration, position + 2.0)
+                    else:
+                        elapsed = time.monotonic() - start_time
+                        position = min(position + elapsed, duration)
+                        position = min(duration, position + 2.0)
+                    if position >= duration:
+                        break
+                    process = start_playback(position)
+                    start_time = time.monotonic()
+                    paused = False
+            if process is not None and process.poll() is not None:
+                break
+    finally:
+        stop_event.set()
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        monitor_thread.join()
+        print()
 
 
 def read_single_key() -> str:
@@ -470,33 +714,40 @@ def read_single_key() -> str:
 
 def prompt_decision(candidate: Optional[Dict[str, Any]] = None) -> str:
     commands = [
-        "[y] approve",
-        "[n] reject",
+        "[a] approve",
+        "[r] reject",
         "[p] play",
         "[b] back",
-        "[f] forward",
-        "[q] quit",
+        "[n] forward",
         "[e] edit text",
         "[-] step back",
         "[=] trim end",
-        "[r] restore trims",
+        "[u] untrim",
         "[+] merge forward",
+        "[x] export approved",
+        "[esc] quit",
     ]
     if candidate and candidate.get("merge_history"):
-        commands.append("[u] unmerge")
+        commands.append("[m] unmerge")
     print("Commands: " + ", ".join(commands))
     print("Choice: ", end="", flush=True)
-    key = read_single_key().strip().lower()
-    print(key)
+    key = read_single_key()
     if key == "":
-        return "y"
-    return key[0]
+        return "a"
+    if key == "\x1b":
+        print()
+        return key
+    print(key)
+    return key.strip().lower()[:1]
 
 
 def review_candidates(
     candidates: List[Dict[str, Any]],
     sample_rate: int,
     padding: float,
+    session: Dict[str, Any],
+    scratch_dir: Path,
+    samples_dir: Path,
 ) -> None:
     for candidate in candidates:
         ensure_candidate_metadata(candidate)
@@ -508,27 +759,32 @@ def review_candidates(
         print(f"\n[{idx + 1}/{total}] {candidate['text']}")
         print(f"Current decision: {candidate['decision']}")
         action = prompt_decision(candidate)
-        if action == "y":
+        if action == "a":
             candidate["decision"] = "approved"
             idx += 1
-        elif action == "n" or action == "s":
+        elif action == "r":
             candidate["decision"] = "rejected"
             idx += 1
         elif action == "p":
-            play_audio(Path(candidate["wav_path"]))
+            play_audio(Path(candidate["wav_path"]), candidate=candidate, padding=padding, sample_rate=sample_rate)
         elif action == "b":
             if idx > 0:
                 idx -= 1
             else:
                 print("Already at first sample.")
-        elif action == "f":
-            idx += 1
+        elif action == "n":
+            if idx + 1 < len(candidates):
+                idx += 1
+            else:
+                print("Already at last sample.")
         elif action == "e":
             print(f"Current text: {candidate['text']}")
             edited = input_with_prefill("New text (leave blank to keep current): ", candidate["text"]).strip()
             if edited and edited != candidate["text"]:
                 candidate["text"] = edited
                 save_candidate_text(candidate)
+        elif action == "x":
+            export_approved_samples(candidates, samples_dir, session, scratch_dir)
         elif action == "-":
             candidate["start"] = max(0.0, candidate["start"] - padding)
             next_start = None
@@ -545,7 +801,7 @@ def review_candidates(
                 if next_candidate["source"] == candidate["source"]:
                     next_start = next_candidate["start"] - padding
             rebuild_candidate_wav(candidate, sample_rate, padding, max_end=next_start)
-        elif action == "r":
+        elif action in ("u", "t"):
             candidate["start"] = candidate.get("original_start", candidate["start"])
             candidate["end"] = candidate.get("original_end", candidate["end"])
             next_start = None
@@ -587,7 +843,7 @@ def review_candidates(
                             next_start = following_candidate["start"] - padding
                     save_candidate_text(candidate)
                     rebuild_candidate_wav(candidate, sample_rate, padding, max_end=next_start)
-        elif action == "u":
+        elif action == "m":
             if not candidate.get("merge_history"):
                 print("Nothing to unmerge.")
             else:
@@ -609,10 +865,12 @@ def review_candidates(
                         next_start = following_candidate["start"] - padding
                 rebuild_candidate_wav(candidate, sample_rate, padding, max_end=next_start)
                 rebuild_candidate_wav(next_candidate, sample_rate, padding)
-        elif action == "q":
-            save_session(session_path, {"candidates": candidates})
-            print(f"Progress saved to {session_path}. Run with --resume to continue.")
-            sys.exit(0)
+        elif action == "\x1b":
+            if confirm_yes_no("Quit and save progress?"):
+                save_session(session_path, {"language": session.get("language"), "candidates": candidates, "last_exported": session.get("last_exported", []), "samples_dir": session.get("samples_dir")})
+                print(f"Progress saved to {session_path}. Run with --resume to continue.")
+                sys.exit(0)
+            print("Continue review.")
         else:
             print("Unknown command.")
         save_session(session_path, {"candidates": candidates})
@@ -638,9 +896,54 @@ def append_approved_samples(
     return count
 
 
+def export_approved_samples(
+    candidates: List[Dict[str, Any]],
+    samples_dir: Path,
+    session: Dict[str, Any],
+    scratch_dir: Path,
+) -> int:
+    samples_dir = samples_dir.resolve()
+    samples_dir.mkdir(parents=True, exist_ok=True)
+
+    last_exported = session.get("last_exported", [])
+    for file_path in last_exported:
+        try:
+            Path(file_path).unlink()
+        except OSError:
+            pass
+
+    start_index = find_last_sample_index(samples_dir) + 1
+    exported: List[str] = []
+    count = 0
+    for candidate in candidates:
+        if candidate["decision"] != "approved":
+            continue
+        out_wav = samples_dir / f"sample_{start_index}.wav"
+        out_txt = samples_dir / f"sample_{start_index}.txt"
+        shutil.copy2(candidate["wav_path"], out_wav)
+        Path(out_txt).write_text(candidate["text"], encoding="utf-8")
+        exported.append(str(out_wav))
+        exported.append(str(out_txt))
+        start_index += 1
+        count += 1
+
+    session["last_exported"] = exported
+    session["samples_dir"] = str(samples_dir)
+    save_session(scratch_dir / SESSION_FILENAME, session)
+    print(f"Exported {count} approved samples to {samples_dir}.")
+
+    return count
+
+
 def confirm_yes_no(prompt: str) -> bool:
-    answer = input(prompt + " [y/N]: ").strip().lower()
-    return answer in {"y", "yes"}
+    sys.stdout.write(prompt + " [y/N]: ")
+    sys.stdout.flush()
+    key = read_single_key()
+    if key in {"\r", "\n", "\x1b", "n", "N"}:
+        sys.stdout.write("\n")
+        return False
+    sys.stdout.write(key + "\n")
+    return key.lower() == "y"
 
 
 def build_session_from_audio(
@@ -664,13 +967,18 @@ def build_session_from_audio(
         if denoiser_obj is not None:
             denoised_path = denoised_dir / audio_path.name
             if not denoised_path.exists():
-                denoise_audio(audio_path, denoised_path, denoiser_obj)
+                with Spinner(f"Denoising: {audio_path.name}"):
+                    denoise_audio(audio_path, denoised_path, denoiser_obj)
+                print(f"Denoised: {audio_path.name}")
+            else:
+                print(f"Using cached denoised audio: {audio_path.name}")
             source_path = denoised_path
-        print(f"Transcribing: {source_path.name}")
         kwargs: Dict[str, Any] = {"fp16": False}
         if detected_language:
             kwargs["language"] = detected_language
-        result = model.transcribe(str(source_path), **kwargs)
+        with Spinner(f"Transcribing {source_path.name}"):
+            result = model.transcribe(str(source_path), **kwargs)
+        print(f"Transcribed: {source_path.name}")
         if not detected_language:
             detected_language = result.get("language", detected_language)
             if detected_language:
@@ -767,7 +1075,7 @@ def main() -> None:
             raise SystemExit(f"No saved session found in {scratch_dir}.")
         session = load_session(session_path)
         candidates = session.get("candidates", [])
-        language = session.get("language", args.lang)
+        language = session.get("language") or args.lang or "en"
     else:
         audio_paths = find_audio_paths(args.inputs, recursive=args.recursive)
         language, candidates = build_session_from_audio(
@@ -787,29 +1095,24 @@ def main() -> None:
         }
         save_session(session_path, session)
 
+    samples_dir = args.samples_dir
+    if samples_dir is None:
+        samples_dir = Path.cwd() / "samples" / language
+    samples_dir = samples_dir.resolve()
+
     if args.approve_all:
         for candidate in candidates:
             candidate["decision"] = "approved"
         save_session(session_path, session)
     else:
         try:
-            review_candidates(candidates, args.sample_rate, args.padding)
+            review_candidates(candidates, args.sample_rate, args.padding, session, scratch_dir, samples_dir)
         except KeyboardInterrupt:
-            save_session(session_path, {"language": session.get("language"), "candidates": candidates})
+            save_session(session_path, {"language": session.get("language"), "candidates": candidates, "last_exported": session.get("last_exported", []), "samples_dir": session.get("samples_dir")})
             print(f"Progress saved to {session_path}. You can resume with --resume.")
             sys.exit(0)
 
-    samples_dir = args.samples_dir
-    if samples_dir is None:
-        samples_dir = Path.cwd() / "samples" / language
-    samples_dir = samples_dir.resolve()
-    appended = append_approved_samples(candidates, samples_dir)
-    print(f"Appended {appended} approved samples to {samples_dir}.")
-
-    if appended and not args.keep_scratch:
-        shutil.rmtree(scratch_dir, ignore_errors=True)
-        print(f"Removed scratch directory {scratch_dir}.")
-    elif args.keep_scratch:
+    if args.keep_scratch:
         print(f"Scratch directory preserved at {scratch_dir}.")
 
 
