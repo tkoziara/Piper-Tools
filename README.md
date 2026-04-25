@@ -6,8 +6,8 @@ training models, exporting them to ONNX, and running synthesis tests.
 A common workflow is:
 1. prepare or collect data locally with `record_samples.py` and set them up for training with `train.py init`
 2. train a model in Google Colab using `Training_EN.ipynb` / `Training_PL.ipynb`
-3. export the trained checkpoint with `train.py export` or `train.sh`
-4. synthesize using `synth.py` or `synth.sh`
+3. export the trained checkpoint with `train.py export`
+4. synthesize using `synth.py`
 
 Files in this repository:
 
@@ -15,9 +15,7 @@ Files in this repository:
 - `bootstrap.sh` — bootstrap the repo and Python environment; optionally installs system packages, clones `piper1-gpl`, builds native extensions, and installs Python dependencies into a venv.
 - `setup_venv.sh` — create and activate the local `.venv`, install Python requirements, and prepare the training/export environment.
 - `train.py` — main CLI wrapper for dataset initialization, training, and export.
-- `train.sh` — wrapper to activate `.venv` and run `train.py`.
 - `synth.py` — runtime synthesis script for built-in voices or a trained ONNX model.
-- `synth.sh` — wrapper to activate `.venv` and run `synth.py`.
 - `checkpoint.py` — list and download Hugging Face Piper checkpoints.
 - `record_samples.py` — interactive web tool for collecting microphone samples plus transcriptions.
 - `generate_samples.py` — generate samples from recorded audio clips.
@@ -57,7 +55,7 @@ pip install piper-tts
 
 ## Training and export
 
-The simplest training helper is `train.sh`. It can:
+Use `train.py` for training and export. It can:
 
 - prepare a dataset and download a base checkpoint if needed
 - run training
