@@ -19,6 +19,7 @@ Files in this repository:
 - `checkpoint.py` — list and download Hugging Face Piper checkpoints.
 - `record_samples.py` — interactive web tool for collecting microphone samples plus transcriptions.
 - `generate_samples.py` — generate samples from recorded audio clips.
+- `create_phase_configs.py` — helper for dynamically generating training phase settings based on dataset size.
 - `sample_en.txt` — English test sentence.
 - `sample_pl.txt` — Polish test sentence.
 - `Training_EN.ipynb` — Google Colab notebook for English training.

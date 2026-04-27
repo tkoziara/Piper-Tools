@@ -29,6 +29,8 @@ import tempfile
 import json
 import warnings
 
+from create_phase_configs import create_phase_configs
+
 # Suppress a noisy FutureWarning emitted by some versions of torch when
 # libraries call `torch.load`.  Keep the filter targeted to FutureWarning
 # messages referencing `torch.load` so other useful warnings still appear.
@@ -266,6 +268,16 @@ def quality_presets(quality: str) -> Dict[str, str]:
         "precision": "16",
         "notes": "balanced",
     }
+
+
+def find_latest_checkpoint(out_dir: Path) -> Path:
+    tts_dir = out_dir / "tts_output"
+    if not tts_dir.exists():
+        raise SystemExit(f"No training output directory found: {tts_dir}")
+    ckpts = sorted(tts_dir.rglob("*.ckpt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not ckpts:
+        raise SystemExit(f"No checkpoint files found under {tts_dir}")
+    return ckpts[0]
 
 
 def ensure_hf_hub_installed() -> None:
@@ -1017,6 +1029,9 @@ def main():
     p_train.add_argument("--precision", type=str, default=None,
                          choices=["16", "32"],
                          help="Trainer precision for mixed precision training")
+    p_train.add_argument("--phase", type=str, default=None,
+                         choices=["warmup", "alignment", "core_training", "consolidation", "fine_tuning", "all"],
+                         help="Optional training phase preset. Use 'all' to run through all phases sequentially.")
     p_train.add_argument("--model-id", type=str, default=None,
                          help="Optional model id or filename to select when auto-fetching a base checkpoint")
     p_train.add_argument("--model-pattern", type=str, default=None,
@@ -1060,6 +1075,60 @@ def main():
                 model_pattern=args.model_pattern,
                 yes=args.yes,
             )
+
+        phase = args.phase
+        if phase is not None:
+            phase = phase.lower()
+            number_of_samples = None
+            metadata_path = out_dir / "metadata.csv"
+            if not metadata_path.exists():
+                raise SystemExit(f"Cannot apply phase presets: metadata.csv not found in {out_dir}")
+            number_of_samples = sum(1 for _ in metadata_path.read_text(encoding="utf-8").splitlines() if _.strip())
+            phase_configs = create_phase_configs(number_of_samples)
+
+            if phase == "all":
+                current_ckpt = ckpt_path
+                for phase_name in ["warmup", "alignment", "core_training", "consolidation", "fine_tuning"]:
+                    cfg = phase_configs[phase_name]
+                    print(f"\n=== Training phase: {phase_name} ===")
+                    run_train(
+                        out_dir,
+                        current_ckpt,
+                        args.voice_name,
+                        args.quality,
+                        args.gpu,
+                        args.run,
+                        cfg["MAX_EPOCHS"],
+                        batch_size=cfg["BATCH_SIZE"],
+                        num_workers=args.num_workers,
+                        espeak_voice=args.espeak_voice,
+                        shuffle_mode=args.shuffle_mode,
+                        sample_rate=args.sample_rate,
+                        learning_rate=cfg["LEARNING_RATE"],
+                        learning_rate_d=cfg["LEARNING_RATE_D"],
+                        lr_decay=cfg["LR_DECAY"],
+                        lr_decay_d=cfg["LR_DECAY_D"],
+                        segment_size=args.segment_size,
+                        precision=args.precision,
+                    )
+                    if args.run:
+                        current_ckpt = find_latest_checkpoint(out_dir)
+                return
+            else:
+                cfg = phase_configs[phase]
+                if args.epochs is None:
+                    args.epochs = cfg["MAX_EPOCHS"]
+                if args.batch_size is None:
+                    args.batch_size = cfg["BATCH_SIZE"]
+                if args.learning_rate is None:
+                    args.learning_rate = cfg["LEARNING_RATE"]
+                if args.learning_rate_d is None:
+                    args.learning_rate_d = cfg["LEARNING_RATE_D"]
+                if args.lr_decay is None:
+                    args.lr_decay = cfg["LR_DECAY"]
+                if args.lr_decay_d is None:
+                    args.lr_decay_d = cfg["LR_DECAY_D"]
+
         run_train(
             out_dir,
             ckpt_path,
