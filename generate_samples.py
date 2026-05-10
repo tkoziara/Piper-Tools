@@ -984,6 +984,7 @@ def build_session_from_audio(
     scratch_dir: Path,
     padding: float,
     denoise: bool,
+    debug_segmentation: bool = False,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     denoiser_obj = init_denoiser() if denoise else None
     model = load_whisper_model(model_name)
@@ -1014,6 +1015,21 @@ def build_session_from_audio(
             if detected_language:
                 print(f"Detected language: {detected_language}")
         segments = result.get("segments", [])
+        if debug_segmentation:
+            print("[debug] raw whisper segments:")
+            for idx, segment in enumerate(segments, start=1):
+                start = float(segment.get("start", 0.0))
+                end = float(segment.get("end", start))
+                text = str(segment.get("text", "")).strip()
+                print(f"[debug] seg {idx}/{len(segments)}: {start:.2f}-{end:.2f}: {text}")
+            sentences = build_sentence_candidates(segments)
+            print("[debug] sentence candidates:")
+            for idx, sentence in enumerate(sentences, start=1):
+                start = float(sentence.get("start", 0.0))
+                end = float(sentence.get("end", start))
+                text = str(sentence.get("text", "")).strip()
+                print(f"[debug] sample {idx}/{len(sentences)}: {start:.2f}-{end:.2f}: {text}")
+            sys.exit(0)
         sentences = build_sentence_candidates(segments)
         print(f"Detected {len(sentences)} sentence candidates in {source_path.name}")
         recordings.extend([
@@ -1086,6 +1102,7 @@ def main() -> None:
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE, help="Output WAV sample rate.")
     parser.add_argument("--padding", type=parse_padding, default=DEFAULT_PADDING, help="Seconds of padding to add before/after each extracted sample (minimum 0.1).")
     parser.add_argument("--denoise", action="store_true", help="Denoise extracted sentence samples using DeepFilterNet.")
+    parser.add_argument("--debug-segmentation", action="store_true", help="Print raw Whisper segments and sentence candidates then exit.")
     parser.add_argument("--approve-all", action="store_true", help="Auto-approve all detected samples and skip interactive review.")
     parser.add_argument("--resume", action="store_true", help="Resume a previously saved approval session in the scratch directory.")
     parser.add_argument("--recursive", action="store_true", help="Scan input directories recursively.")
@@ -1117,6 +1134,7 @@ def main() -> None:
             scratch_dir,
             args.padding,
             args.denoise,
+            args.debug_segmentation,
         )
         session = {
             "language": language,
