@@ -16,6 +16,7 @@ Files in this repository:
 - `setup_venv.sh` — create and activate the local `.venv`, install Python requirements, and prepare the training/export environment.
 - `train.py` — main CLI wrapper for dataset initialization, training, and export.
 - `synth.py` — runtime synthesis script for built-in voices or a trained ONNX model.
+- `voice_samples.py` — batch-synthesize a phrase with all voice models for given languages, then interactively listen and approve/reject samples; supports playback with animated progress and single-key skip.
 - `checkpoint.py` — list and download Hugging Face Piper checkpoints.
 - `record_samples.py` — interactive web tool for collecting microphone samples plus transcriptions.
 - `generate_samples.py` — generate samples from recorded audio clips.
