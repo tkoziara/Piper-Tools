@@ -161,7 +161,19 @@ def load_approved(output_dir):
     return []
 
 
-def play_samples(output_dir, number=None, approve=False):
+def load_gender(output_dir):
+    p = output_dir / "gender.json"
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def play_samples(output_dir, number=None, approve=False, tag=False, narrow=False):
     samples = get_voice_samples(output_dir)
     if not samples:
         print("No synthesized voice samples found in", output_dir)
@@ -169,6 +181,16 @@ def play_samples(output_dir, number=None, approve=False):
 
     previously_approved = set(load_approved(output_dir))
     approved = list(previously_approved)
+
+    previously_tagged = load_gender(output_dir)
+    tagged = dict(previously_tagged)
+
+    if narrow:
+        samples = [(n, p) for n, p in samples if n in previously_approved]
+        if not samples:
+            print("No previously approved samples found; nothing to play.")
+            return
+        print(f"Narrowed to {len(samples)} previously approved sample(s).")
 
     indices = list(range(len(samples))) if number is None else [number - 1]
     i = 0
@@ -181,9 +203,13 @@ def play_samples(output_dir, number=None, approve=False):
                 continue
             voice_name, path = samples[idx]
 
-            status = ""
+            status_parts = []
             if approve and previously_approved:
-                status = " [previously approved]" if voice_name in previously_approved else " [previously skipped]"
+                label = "previously approved" if voice_name in previously_approved else "previously skipped"
+                status_parts.append(label)
+            if tag and voice_name in previously_tagged:
+                status_parts.append(f"previously: {previously_tagged[voice_name]}")
+            status = (f" [{', '.join(status_parts)}]") if status_parts else ""
 
             played = play_file(path, prefix=f"Playing #{idx + 1}: {voice_name}{status}")
 
@@ -191,38 +217,71 @@ def play_samples(output_dir, number=None, approve=False):
                 i += 1
                 continue
 
-            if not approve:
-                i += 1
-                continue
-
-            print(f"Approve \"{voice_name}\"? [y -- approve / SPACE -- replay / g -- go to / other -- skip] ", end="", flush=True)
-            ch = _getch()
-            print()
-            if ch == "y":
-                approved.append(voice_name)
-                print(f"  Approved: {voice_name}")
-                i += 1
-            elif ch == " ":
-                continue
-            elif ch == "g":
-                min_n = indices[0] + 1
-                max_n = indices[-1] + 1
-                try:
-                    target = input(f"  Go to sample ({min_n}-{max_n}): ").strip()
-                    target_n = int(target)
-                except (ValueError, EOFError):
-                    print("  Invalid input")
+            if approve:
+                print(f"Approve \"{voice_name}\"? [y -- approve / SPACE -- replay / g -- go to / other -- skip] ", end="", flush=True)
+                ch = _getch()
+                print()
+                if ch == "y":
+                    approved.append(voice_name)
+                    print(f"  Approved: {voice_name}")
+                    i += 1
+                elif ch == " ":
                     continue
-                if target_n < min_n or target_n > max_n:
-                    print(f"  Out of range (valid: {min_n}-{max_n})")
-                    continue
-                target_idx = target_n - 1
-                if target_idx in indices:
-                    i = indices.index(target_idx)
+                elif ch == "g":
+                    min_n = indices[0] + 1
+                    max_n = indices[-1] + 1
+                    try:
+                        target = input(f"  Go to sample ({min_n}-{max_n}): ").strip()
+                        target_n = int(target)
+                    except (ValueError, EOFError):
+                        print("  Invalid input")
+                        continue
+                    if target_n < min_n or target_n > max_n:
+                        print(f"  Out of range (valid: {min_n}-{max_n})")
+                        continue
+                    target_idx = target_n - 1
+                    if target_idx in indices:
+                        i = indices.index(target_idx)
+                    else:
+                        print(f"  Sample #{target_n} is not in the current play list")
                 else:
-                    print(f"  Sample #{target_n} is not in the current play list")
+                    print(f"  Skipped: {voice_name}")
+                    i += 1
+            elif tag:
+                print(f"Tag \"{voice_name}\" gender? [m -- male / f -- female / SPACE -- replay / g -- go to / other -- skip] ", end="", flush=True)
+                ch = _getch()
+                print()
+                if ch == "m":
+                    tagged[voice_name] = "male"
+                    print(f"  Tagged as male: {voice_name}")
+                    i += 1
+                elif ch == "f":
+                    tagged[voice_name] = "female"
+                    print(f"  Tagged as female: {voice_name}")
+                    i += 1
+                elif ch == " ":
+                    continue
+                elif ch == "g":
+                    min_n = indices[0] + 1
+                    max_n = indices[-1] + 1
+                    try:
+                        target = input(f"  Go to sample ({min_n}-{max_n}): ").strip()
+                        target_n = int(target)
+                    except (ValueError, EOFError):
+                        print("  Invalid input")
+                        continue
+                    if target_n < min_n or target_n > max_n:
+                        print(f"  Out of range (valid: {min_n}-{max_n})")
+                        continue
+                    target_idx = target_n - 1
+                    if target_idx in indices:
+                        i = indices.index(target_idx)
+                    else:
+                        print(f"  Sample #{target_n} is not in the current play list")
+                else:
+                    print(f"  Skipped (untagged): {voice_name}")
+                    i += 1
             else:
-                print(f"  Skipped: {voice_name}")
                 i += 1
     except KeyboardInterrupt:
         print("\n  Interrupted by user")
@@ -235,6 +294,15 @@ def play_samples(output_dir, number=None, approve=False):
             print(f"Approved voices written to {approved_path}")
         else:
             print("No approvals to save.")
+
+    if tag:
+        gender_path = output_dir / "gender.json"
+        new_tagged = {k: v for k, v in tagged.items() if previously_tagged.get(k) != v}
+        if new_tagged or previously_tagged:
+            gender_path.write_text(json.dumps(tagged, indent=2), encoding="utf-8")
+            print(f"Gender tags written to {gender_path}")
+        else:
+            print("No gender tags to save.")
 
 
 def main():
@@ -275,12 +343,34 @@ def main():
         action="store_true",
         help="Prompt to approve each voice after playback (use with --play)",
     )
+    parser.add_argument(
+        "--tag",
+        action="store_true",
+        help="Prompt to tag each voice as male or female after playback (use with --play; mutually exclusive with --approve)",
+    )
+    parser.add_argument(
+        "--narrow",
+        action="store_true",
+        help="Limit playback to previously approved voices only (use with --play --approve)",
+    )
     args = parser.parse_args()
 
     output_dir = args.output_dir.resolve()
 
     if args.approve and args.play is None:
         print("Error: --approve requires --play", file=sys.stderr)
+        sys.exit(1)
+
+    if args.tag and args.play is None:
+        print("Error: --tag requires --play", file=sys.stderr)
+        sys.exit(1)
+
+    if args.approve and args.tag:
+        print("Error: --approve and --tag are mutually exclusive", file=sys.stderr)
+        sys.exit(1)
+
+    if args.narrow and not (args.play is not None and args.approve):
+        print("Error: --narrow requires --play and --approve", file=sys.stderr)
         sys.exit(1)
 
     if args.list or args.play is not None:
@@ -291,7 +381,7 @@ def main():
                 print(f"Output directory '{output_dir}' does not exist.", file=sys.stderr)
                 sys.exit(1)
             n = None if args.play == -1 else args.play
-            play_samples(output_dir, n, approve=args.approve)
+            play_samples(output_dir, n, approve=args.approve, tag=args.tag, narrow=args.narrow)
         return
 
     output_dir.mkdir(parents=True, exist_ok=True)
